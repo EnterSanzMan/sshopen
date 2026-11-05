@@ -94,7 +94,13 @@ internal static unsafe partial class Win32
     public const int IDOK = 1, IDCANCEL = 2, IDRETRY = 4, IDYES = 6;
     public const uint MB_OK = 0, MB_RETRYCANCEL = 5, MB_YESNO = 4, MB_DEFBUTTON2 = 0x100;
     public const uint MB_ICONERROR = 0x10, MB_ICONQUESTION = 0x20, MB_ICONWARNING = 0x30, MB_ICONINFORMATION = 0x40;
-    public const uint WM_NOTIFY = 0x004E, WS_BORDER = 0x00800000;
+    public const uint WM_NOTIFY = 0x004E, WS_BORDER = 0x00800000, WS_VSCROLL = 0x00200000;
+
+    // ComboBox
+    public const uint CBS_DROPDOWN = 0x0002, CBS_AUTOHSCROLL = 0x0040, CBS_SORT = 0x0100;
+    public const uint CB_ADDSTRING = 0x0143, CB_GETCURSEL = 0x0147, CB_GETLBTEXT = 0x0148, CB_GETLBTEXTLEN = 0x0149;
+    public const uint CB_RESETCONTENT = 0x014B, CB_SETCURSEL = 0x014E, CB_FINDSTRINGEXACT = 0x0158;
+    public const int CB_ERR = -1, CBN_SELCHANGE = 1;
 
     // ListView (comctl32)
     public const uint LVS_REPORT = 0x0001, LVS_SINGLESEL = 0x0004, LVS_SHOWSELALWAYS = 0x0008;

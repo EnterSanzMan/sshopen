@@ -21,12 +21,13 @@ internal static class Plugin
 
     public static void OpenRemote()
     {
-        var (request, remember) = Config.LoadLast();
-        request = WithKnownPassword(request);
+        var (last, remember, profile) = Config.LoadLast();
+        var request = WithKnownPassword(last);
+        var options = new ConnectOptions { Remember = remember, Profile = profile };
 
         while (true)
         {
-            var r = ConnectDialog.Show(Npp.Handle, "Abrir fichero remoto (SSH/SFTP)", "Conectar", request, ref remember);
+            var r = ConnectDialog.Show(Npp.Handle, "Abrir fichero remoto (SSH/SFTP)", "Conectar", request, options);
             if (r is null)
                 return;
             request = r;
@@ -48,7 +49,7 @@ internal static class Plugin
 
                 string? path = BrowseDialog.Show(Npp.Handle, client, folder, select,
                     $"{request.User}@{request.Host} - Elige el fichero a abrir", out string lastFolder);
-                Config.SaveLast(request with { RemotePath = lastFolder }, remember);
+                Config.SaveLast(request with { RemotePath = lastFolder }, options.Remember, options.Profile);
                 if (path is null)
                     return;
 
@@ -56,14 +57,13 @@ internal static class Plugin
                 string localPath = LocalPathFor(target);
                 if (!HasUnsyncedChanges(client, path, localPath) || ConfirmOverwriteLocal(path))
                 {
-                    using (new WaitCursor())
-                        Sftp.Download(client, path, localPath);
+                    target = Download(client, target, localPath);
                     PendingUpload.Remove(localPath);
                 }
 
                 Config.MapFile(localPath, target);
                 Npp.OpenFile(localPath);
-                Npp.SetStatus("SFTP: abierto " + target.Display);
+                Npp.SetStatus($"SFTP: abierto {target.Display}{(target.Sudo ? " (sudo)" : "")}");
                 return;
             }
             catch (OperationCanceledException)
@@ -77,6 +77,40 @@ internal static class Plugin
                 ShowError("No se pudo abrir " + request.Display, ex);
             }
         }
+    }
+
+    /// <summary>Descarga por SFTP; sin permiso de lectura ofrece hacerlo con sudo.</summary>
+    private static ConnectionRequest Download(Renci.SshNet.SftpClient client, ConnectionRequest target, string localPath)
+    {
+        try
+        {
+            using (new WaitCursor())
+                Sftp.Download(client, target.RemotePath, localPath);
+            return target with { Sudo = false };
+        }
+        catch (SftpPermissionDeniedException) when (AskSudo(target, "leer"))
+        {
+            using (new WaitCursor())
+                Sudo.Download(target, localPath);
+            return target with { Sudo = true };
+        }
+    }
+
+    // Cuentas para las que el usuario ya aceptó usar sudo en esta sesión.
+    private static readonly HashSet<string> SudoAccounts = new(StringComparer.Ordinal);
+
+    private static bool AskSudo(ConnectionRequest r, string action)
+    {
+        if (SudoAccounts.Contains(r.Account))
+            return true;
+        int answer = Win32.MessageBox(Npp.Handle,
+            $"{r.User} no tiene permiso para {action} {r.RemotePath}.\n\n¿Intentar con sudo (con la misma clave)?\n\n" +
+            $"No se volverá a preguntar para {r.Account} mientras Notepad++ siga abierto.",
+            Name, Win32.MB_YESNO | Win32.MB_ICONQUESTION);
+        if (answer != Win32.IDYES)
+            return false;
+        SudoAccounts.Add(r.Account);
+        return true;
     }
 
     private static bool IsFile(Renci.SshNet.SftpClient client, string path)
@@ -164,6 +198,8 @@ internal static class Plugin
             "   doble clic o Intro para entrar o abrir, Retroceso para subir de carpeta.\n" +
             "• El fichero se descarga a una copia en %TEMP%\\SshOpen.\n" +
             "• Al guardar (Ctrl+S) se sube automáticamente al servidor.\n" +
+            "• Si el usuario no tiene permiso sobre el fichero, ofrece leerlo y escribirlo con sudo.\n" +
+            "• Los perfiles guardan servidor, puerto, usuario y carpeta (nunca la clave).\n" +
             "• La clave solo se guarda en memoria mientras Notepad++ está abierto.\n" +
             "• La huella del servidor se pide la primera vez y se recuerda.",
             Name, Win32.MB_ICONINFORMATION);
@@ -176,22 +212,31 @@ internal static class Plugin
         {
             if (!Passwords.ContainsKey(request.Account))
             {
-                bool remember = false;
                 var r = ConnectDialog.Show(Npp.Handle, "Subir " + Path.GetFileName(localPath) + " al servidor",
-                    "Subir", request, ref remember, showRemember: false, allowFolder: false);
+                    "Subir", request, options: null);
                 if (r is null)
                 {
                     PendingUpload.Add(localPath);
                     Npp.SetStatus("SFTP: subida cancelada, los cambios solo están en la copia local");
                     return;
                 }
-                request = r;
+                request = r with { Sudo = request.Sudo };
             }
 
             try
             {
                 using (new WaitCursor())
-                    Sftp.Upload(request, localPath);
+                {
+                    if (request.Sudo)
+                        Sudo.Upload(request, localPath);
+                    else
+                        Sftp.Upload(request, localPath);
+                }
+            }
+            catch (SftpPermissionDeniedException) when (!request.Sudo && AskSudo(request, "escribir en"))
+            {
+                request = request with { Sudo = true };
+                continue;
             }
             catch (OperationCanceledException)
             {
@@ -216,7 +261,7 @@ internal static class Plugin
             Passwords[request.Account] = request.Password;
             if (request.WithoutPassword() != target)
                 Config.MapFile(localPath, request);
-            Npp.SetStatus($"SFTP: subido {request.Display} ({DateTime.Now:HH:mm:ss})");
+            Npp.SetStatus($"SFTP: subido {request.Display}{(request.Sudo ? " (sudo)" : "")} ({DateTime.Now:HH:mm:ss})");
             return;
         }
     }

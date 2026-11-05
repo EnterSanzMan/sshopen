@@ -28,8 +28,8 @@ internal static unsafe class Exports
         if (_funcs == null)
         {
             _funcs = (FuncItem*)NativeMemory.AllocZeroed((nuint)(sizeof(FuncItem) * FuncCount));
-            SetFunc(0, "Abrir fichero remoto (SSH)...", &Commands.OpenRemote);
-            SetFunc(1, "Subir fichero actual al servidor", &Commands.UploadCurrent);
+            SetFunc(0, "Abrir fichero remoto (SSH)...", &Commands.OpenRemote, Shortcut(ctrl: true, alt: true, key: 'O'));
+            SetFunc(1, "Subir fichero actual al servidor", &Commands.UploadCurrent, Shortcut(ctrl: true, alt: true, key: 'U'));
             SetFunc(2, "", null); // separador
             SetFunc(3, "Acerca de...", &Commands.About);
         }
@@ -49,11 +49,22 @@ internal static unsafe class Exports
     [UnmanagedCallersOnly(EntryPoint = "messageProc")]
     private static nint MessageProc(uint message, nuint wParam, nint lParam) => 1;
 
-    private static void SetFunc(int index, string name, delegate* unmanaged<void> func)
+    private static void SetFunc(int index, string name, delegate* unmanaged<void> func, ShortcutKey* shortcut = null)
     {
         FuncItem* item = &_funcs[index];
         name.AsSpan(0, Math.Min(name.Length, 63)).CopyTo(new Span<char>(item->ItemName, 64));
         item->PFunc = (IntPtr)func;
+        item->PShKey = (IntPtr)shortcut;
+    }
+
+    /// <summary>Atajo por defecto; el usuario puede cambiarlo en Configuración → Administrador de atajos.</summary>
+    private static ShortcutKey* Shortcut(bool ctrl, bool alt, char key)
+    {
+        var sk = (ShortcutKey*)NativeMemory.AllocZeroed((nuint)sizeof(ShortcutKey)); // vive mientras el plugin
+        sk->IsCtrl = ctrl ? (byte)1 : (byte)0;
+        sk->IsAlt = alt ? (byte)1 : (byte)0;
+        sk->Key = (byte)key;
+        return sk;
     }
 }
 

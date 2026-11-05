@@ -22,6 +22,15 @@ internal struct NotifyHeader
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct ShortcutKey
+{
+    public byte IsCtrl;
+    public byte IsAlt;
+    public byte IsShift;
+    public byte Key; // código de tecla virtual
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct FuncItem
 {
     public fixed char ItemName[64];

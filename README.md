@@ -8,10 +8,11 @@ con el subsistema SFTP (el habitual de OpenSSH).
 
 ## Uso
 
-**Plugins → SshOpen → Abrir fichero remoto (SSH)...**
+**Plugins → SshOpen → Abrir fichero remoto (SSH)...** (Ctrl+Alt+O; *Subir fichero actual* es Ctrl+Alt+U)
 
 | Campo          | Ejemplo        |
 |----------------|----------------|
+| Perfil         | opcional: nombre con el que guardar o cargar la conexión |
 | Servidor (IP)  | `192.168.1.10` |
 | Puerto         | `22`           |
 | Usuario        | `root`         |
@@ -28,13 +29,28 @@ con el subsistema SFTP (el habitual de OpenSSH).
 4. Si la subida falla, los cambios siguen en la copia local y puedes reintentar.
    **Subir fichero actual al servidor** fuerza la subida a mano.
 
+### Perfiles
+
+Escribe un nombre en *Perfil* y pulsa **Guardar** para recordar servidor, puerto, usuario y
+carpeta inicial (la clave nunca se guarda). Al elegir un perfil de la lista se rellenan los campos
+y solo queda teclear la clave. **Borrar** elimina el perfil seleccionado.
+
+### Ficheros de root (sudo)
+
+Si tu usuario no puede leer o escribir el fichero (por ejemplo `/etc/nginx/nginx.conf`), el plugin
+ofrece hacerlo con `sudo` usando la misma clave: lee con `sudo cat` y guarda con `sudo tee`, que
+sobrescribe en el sitio y conserva propietario y permisos. Requiere que el usuario esté en
+`sudoers` y que no tenga `requiretty`. Una vez aceptado, no vuelve a preguntar para esa cuenta
+mientras Notepad++ siga abierto. La barra de estado indica `(sudo)`.
+
 ### Seguridad
 
 - La clave **solo vive en memoria** mientras Notepad++ está abierto. Si reabres Notepad++ con un
   fichero remoto en la sesión, la pide al guardar.
 - La primera conexión a un servidor enseña su huella SHA256 para que la aceptes (como `known_hosts`).
   Si cambia, avisa.
-- Configuración en `%APPDATA%\Notepad++\plugins\config\SshOpen.*` (sin claves).
+- Configuración en `%APPDATA%\Notepad++\plugins\config\SshOpen.*` (sin claves): última conexión,
+  perfiles, huellas aceptadas y el mapa de copias locales.
 
 ### Limitaciones
 
@@ -64,6 +80,9 @@ Necesitas el SDK de .NET 10 y Visual Studio o Build Tools con *Desarrollo para e
 - La transferencia usa SFTP con [SSH.NET](https://github.com/sshnet/SSH.NET) (`src/Sftp.cs`),
   con autenticación por clave y *keyboard-interactive*.
 - La subida automática escucha `NPPN_FILESAVED` (`src/Plugin.cs`).
+- El acceso con sudo abre un canal de comandos SSH aparte (`src/Sudo.cs`): valida las credenciales
+  con `sudo -S -v` y después ejecuta `sudo -n cat | base64` y `sudo -n tee` con el contenido por
+  la entrada estándar, de modo que la clave nunca se mezcla con el fichero ni aparece en `ps`.
 
 ## Licencia
 

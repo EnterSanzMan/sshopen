@@ -5,6 +5,9 @@ namespace SshOpen;
 
 internal sealed record ConnectionRequest(string Host, int Port, string User, string Password, string RemotePath)
 {
+    /// <summary>El fichero se lee y escribe con sudo (el usuario no tiene permiso directo).</summary>
+    public bool Sudo { get; init; }
+
     /// <summary>Identifica la cuenta en el servidor (para reutilizar la clave durante la sesión).</summary>
     public string Account => $"{User}@{Host}:{Port}";
 
@@ -22,14 +25,18 @@ internal sealed record ConnectionRequest(string Host, int Port, string User, str
 /// <summary>Descarga y subida de ficheros por SFTP (subsistema SSH; el servidor no necesita scp).</summary>
 internal static class Sftp
 {
-    public static void Download(SftpClient client, string remotePath, string localPath)
+    public static void Download(SftpClient client, string remotePath, string localPath) =>
+        WriteLocal(localPath, file => client.DownloadFile(remotePath, file));
+
+    /// <summary>Escribe la copia local a través de un .part para no dejar un fichero a medias.</summary>
+    public static void WriteLocal(string localPath, Action<Stream> write)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
         string partial = localPath + ".part";
         try
         {
             using (var file = File.Create(partial))
-                client.DownloadFile(remotePath, file);
+                write(file);
             File.Move(partial, localPath, overwrite: true);
         }
         catch
@@ -85,18 +92,26 @@ internal static class Sftp
     /// La pregunta al usuario se hace fuera del evento HostKeyReceived, que llega desde un
     /// hilo de SSH.NET mientras el hilo de la interfaz está bloqueado en Connect().
     /// </summary>
-    public static SftpClient Connect(ConnectionRequest r)
+    public static SftpClient Connect(ConnectionRequest r) => Connect(r, info => new SftpClient(info)
+    {
+        // Todo corre en el hilo de la interfaz: sin estos límites una conexión caída
+        // (VPN, servidor colgado) dejaría Notepad++ bloqueado indefinidamente.
+        OperationTimeout = TimeSpan.FromSeconds(60),
+        KeepAliveInterval = TimeSpan.FromSeconds(15),
+    });
+
+    /// <summary>Canal de comandos (para sudo); misma comprobación de huella.</summary>
+    public static SshClient ConnectSsh(ConnectionRequest r) => Connect(r, info => new SshClient(info)
+    {
+        KeepAliveInterval = TimeSpan.FromSeconds(15),
+    });
+
+    private static T Connect<T>(ConnectionRequest r, Func<ConnectionInfo, T> create) where T : BaseClient
     {
         while (true)
         {
             string? fingerprint = null;
-            var client = new SftpClient(CreateConnectionInfo(r))
-            {
-                // Todo corre en el hilo de la interfaz: sin estos límites una conexión caída
-                // (VPN, servidor colgado) dejaría Notepad++ bloqueado indefinidamente.
-                OperationTimeout = TimeSpan.FromSeconds(60),
-                KeepAliveInterval = TimeSpan.FromSeconds(15),
-            };
+            var client = create(CreateConnectionInfo(r));
             client.HostKeyReceived += (_, e) =>
             {
                 fingerprint = "SHA256:" + e.FingerPrintSHA256;
@@ -136,6 +151,9 @@ internal static class Sftp
             Timeout = TimeSpan.FromSeconds(15),
         };
     }
+
+    /// <summary>Ruta entre comillas simples para la shell remota.</summary>
+    public static string ShellQuote(string path) => "'" + path.Replace("'", "'\\''") + "'";
 
     private static bool AskTrust(ConnectionRequest r, string fingerprint)
     {
