@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Plugin de Notepad++ compilado con NativeAOT: genera una DLL nativa x64 con las
+    exportaciones C que espera Notepad++ (setInfo, getName, getFuncsArray, beNotified,
+    messageProc, isUnicode). No necesita .NET instalado en la máquina destino.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>SshOpen</AssemblyName>
+    <RootNamespace>SshOpen</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Runtime y compilador AOT parcheados, independientes del parche del SDK instalado
+         (10.0.9 tiene la vulnerabilidad GHSA-p3jp-9v83-76w9). -->
+    <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
+  </ItemGroup>
+
+</Project>

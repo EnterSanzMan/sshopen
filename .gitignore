@@ -1,0 +1,10 @@
+# Compilación
+bin/
+obj/
+dist/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
