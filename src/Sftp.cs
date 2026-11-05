@@ -22,11 +22,73 @@ internal sealed record ConnectionRequest(string Host, int Port, string User, str
     public override string ToString() => Display;
 }
 
+/// <summary>El servidor presentó una huella que no está aceptada (primera conexión o cambio).</summary>
+internal sealed class UntrustedHostKeyException(string fingerprint, string? known)
+    : Exception("La huella del servidor no está aceptada.")
+{
+    public string Fingerprint => fingerprint;
+    public string? Known => known;
+}
+
+/// <summary>El fichero remoto cambió (o desapareció: <see cref="Current"/> = 0) desde la última sincronización.</summary>
+internal sealed class RemoteChangedException(long current) : Exception("El fichero remoto ha cambiado en el servidor.")
+{
+    /// <summary>Fecha de modificación actual en segundos Unix; 0 si ya no existe.</summary>
+    public long Current => current;
+}
+
 /// <summary>Descarga y subida de ficheros por SFTP (subsistema SSH; el servidor no necesita scp).</summary>
 internal static class Sftp
 {
-    public static void Download(SftpClient client, string remotePath, string localPath) =>
-        WriteLocal(localPath, file => client.DownloadFile(remotePath, file));
+    /// <summary>Descarga el fichero y devuelve su fecha de modificación remota (segundos Unix).</summary>
+    public static long Download(SftpClient client, string remotePath, string localPath, TransferProgress progress)
+    {
+        var attrs = client.GetAttributes(remotePath);
+        progress.Start(attrs.Size);
+        WriteLocal(localPath, file => client.DownloadFile(remotePath, new ProgressStream(file, progress)));
+        return Stamp(attrs.LastWriteTimeUtc);
+    }
+
+    /// <summary>
+    /// Sube la copia local y devuelve la nueva fecha remota. Si <paramref name="expectedStamp"/> no
+    /// es 0 y el fichero remoto ya no tiene esa fecha, lanza <see cref="RemoteChangedException"/>
+    /// sin tocar nada (salvo con <paramref name="force"/>).
+    /// </summary>
+    public static long Upload(ConnectionRequest r, string localPath, TransferProgress progress, long expectedStamp, bool force)
+    {
+        using var client = Connect(r, progress.Token);
+        if (!force)
+            CheckUnchanged(GetStamp(client, r.SftpPath), expectedStamp);
+        using var file = File.OpenRead(localPath);
+        progress.Start(file.Length);
+        // Sobrescribe el fichero existente (mismo inodo): conserva propietario y permisos.
+        client.UploadFile(new ProgressStream(file, progress), r.SftpPath, canOverride: true);
+        return GetStamp(client, r.SftpPath);
+    }
+
+    /// <summary>Fecha de modificación remota en segundos Unix; 0 si no existe o no se puede consultar.</summary>
+    public static long GetStamp(SftpClient client, string path)
+    {
+        try
+        {
+            return Stamp(client.GetLastWriteTimeUtc(path));
+        }
+        catch (SshException)
+        {
+            return 0;
+        }
+    }
+
+    public static long Stamp(DateTime utc) =>
+        new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
+    public static DateTime LocalTime(long stamp) => DateTimeOffset.FromUnixTimeSeconds(stamp).LocalDateTime;
+
+    public static void CheckUnchanged(long current, long expected)
+    {
+        if (expected != 0 && current != expected)
+            throw new RemoteChangedException(current);
+    }
 
     /// <summary>Escribe la copia local a través de un .part para no dejar un fichero a medias.</summary>
     public static void WriteLocal(string localPath, Action<Stream> write)
@@ -79,61 +141,53 @@ internal static class Sftp
         return i <= 0 ? "/" : folder[..i];
     }
 
-    public static void Upload(ConnectionRequest r, string localPath)
-    {
-        using var client = Connect(r);
-        using var file = File.OpenRead(localPath);
-        // Sobrescribe el fichero existente (mismo inodo): conserva propietario y permisos.
-        client.UploadFile(file, r.SftpPath, canOverride: true);
-    }
+    /// <summary>Ruta entre comillas simples para la shell remota.</summary>
+    public static string ShellQuote(string path) => "'" + path.Replace("'", "'\\''") + "'";
 
-    /// <summary>
-    /// Conecta comprobando la huella del servidor (trust-on-first-use, como known_hosts).
-    /// La pregunta al usuario se hace fuera del evento HostKeyReceived, que llega desde un
-    /// hilo de SSH.NET mientras el hilo de la interfaz está bloqueado en Connect().
-    /// </summary>
-    public static SftpClient Connect(ConnectionRequest r) => Connect(r, info => new SftpClient(info)
+    // --- Conexión ---
+
+    public static SftpClient Connect(ConnectionRequest r, CancellationToken token) => Connect(r, token, info => new SftpClient(info)
     {
-        // Todo corre en el hilo de la interfaz: sin estos límites una conexión caída
-        // (VPN, servidor colgado) dejaría Notepad++ bloqueado indefinidamente.
+        // Sin estos límites una conexión caída (VPN, servidor colgado) no terminaría nunca.
         OperationTimeout = TimeSpan.FromSeconds(60),
         KeepAliveInterval = TimeSpan.FromSeconds(15),
     });
 
     /// <summary>Canal de comandos (para sudo); misma comprobación de huella.</summary>
-    public static SshClient ConnectSsh(ConnectionRequest r) => Connect(r, info => new SshClient(info)
+    public static SshClient ConnectSsh(ConnectionRequest r, CancellationToken token) => Connect(r, token, info => new SshClient(info)
     {
         KeepAliveInterval = TimeSpan.FromSeconds(15),
     });
 
-    private static T Connect<T>(ConnectionRequest r, Func<ConnectionInfo, T> create) where T : BaseClient
+    /// <summary>
+    /// Un intento de conexión comprobando la huella del servidor (trust-on-first-use, como
+    /// known_hosts). Si la huella no está aceptada lanza <see cref="UntrustedHostKeyException"/>
+    /// para que la interfaz pregunte; esto corre en un hilo de trabajo y no puede mostrar nada.
+    /// </summary>
+    private static T Connect<T>(ConnectionRequest r, CancellationToken token, Func<ConnectionInfo, T> create) where T : BaseClient
     {
-        while (true)
+        string? known = Config.KnownHost(r.Host, r.Port);
+        string? fingerprint = null;
+        var client = create(CreateConnectionInfo(r));
+        client.HostKeyReceived += (_, e) =>
         {
-            string? fingerprint = null;
-            var client = create(CreateConnectionInfo(r));
-            client.HostKeyReceived += (_, e) =>
-            {
-                fingerprint = "SHA256:" + e.FingerPrintSHA256;
-                e.CanTrust = Config.KnownHost(r.Host, r.Port) == fingerprint;
-            };
-            try
-            {
-                client.Connect();
-                return client;
-            }
-            catch (SshConnectionException) when (fingerprint != null && Config.KnownHost(r.Host, r.Port) != fingerprint)
-            {
-                client.Dispose();
-                if (!AskTrust(r, fingerprint))
-                    throw new OperationCanceledException();
-                Config.TrustHost(r.Host, r.Port, fingerprint);
-            }
-            catch
-            {
-                client.Dispose();
-                throw;
-            }
+            fingerprint = "SHA256:" + e.FingerPrintSHA256;
+            e.CanTrust = known == fingerprint;
+        };
+        try
+        {
+            client.ConnectAsync(token).GetAwaiter().GetResult();
+            return client;
+        }
+        catch (SshConnectionException) when (fingerprint != null && known != fingerprint)
+        {
+            client.Dispose();
+            throw new UntrustedHostKeyException(fingerprint, known);
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
         }
     }
 
@@ -150,19 +204,5 @@ internal static class Sftp
         {
             Timeout = TimeSpan.FromSeconds(15),
         };
-    }
-
-    /// <summary>Ruta entre comillas simples para la shell remota.</summary>
-    public static string ShellQuote(string path) => "'" + path.Replace("'", "'\\''") + "'";
-
-    private static bool AskTrust(ConnectionRequest r, string fingerprint)
-    {
-        string? known = Config.KnownHost(r.Host, r.Port);
-        string text = known == null
-            ? $"Es la primera vez que te conectas a {r.Host}:{r.Port}.\n\nHuella del servidor:\n{fingerprint}\n\n¿Confiar en este servidor?"
-            : $"¡ATENCIÓN! La huella de {r.Host}:{r.Port} ha CAMBIADO.\n\nGuardada:\n{known}\n\nRecibida:\n{fingerprint}\n\n" +
-              "Puede ser una reinstalación del servidor o un ataque man-in-the-middle.\n¿Confiar en la nueva huella?";
-        uint flags = Win32.MB_YESNO | (known == null ? Win32.MB_ICONQUESTION : Win32.MB_ICONWARNING | Win32.MB_DEFBUTTON2);
-        return Win32.MessageBox(Npp.Handle, text, Plugin.Name, flags) == Win32.IDYES;
     }
 }

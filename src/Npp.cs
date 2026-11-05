@@ -44,19 +44,43 @@ internal unsafe struct FuncItem
 internal static unsafe class Npp
 {
     private const uint NPPMSG = 0x0400 + 1000;
+    private const uint NPPM_GETNBOPENFILES = NPPMSG + 7;
     private const uint NPPM_SETSTATUSBAR = NPPMSG + 24;
+    private const uint NPPM_RELOADFILE = NPPMSG + 36;
     private const uint NPPM_SAVECURRENTFILE = NPPMSG + 38;
     private const uint NPPM_GETPLUGINSCONFIGDIR = NPPMSG + 46;
     private const uint NPPM_GETFULLPATHFROMBUFFERID = NPPMSG + 58;
+    private const uint NPPM_GETBUFFERIDFROMPOS = NPPMSG + 59;
     private const uint NPPM_GETCURRENTBUFFERID = NPPMSG + 60;
     private const uint NPPM_DOFILEOPEN = NPPMSG + 77;
     private const nuint STATUSBAR_DOC_TYPE = 0;
 
+    public const uint NPPN_READY = 1000 + 1;
     public const uint NPPN_FILESAVED = 1000 + 8;
 
     public static IntPtr Handle;
 
     public static void OpenFile(string path) => Win32.SendMessage(Handle, NPPM_DOFILEOPEN, 0, path);
+
+    /// <summary>Recarga desde disco un fichero ya abierto, sin preguntar.</summary>
+    public static void ReloadFile(string path) => Win32.SendMessage(Handle, NPPM_RELOADFILE, 0, path);
+
+    /// <summary>Buffers abiertos en las dos vistas (incluye los "new N" sin ruta).</summary>
+    public static List<nuint> OpenBufferIds()
+    {
+        var ids = new List<nuint>();
+        for (int view = 0; view < 2; view++)
+        {
+            int count = (int)Win32.SendMessage(Handle, NPPM_GETNBOPENFILES, 0, view + 1); // 1 = vista principal, 2 = secundaria
+            for (int i = 0; i < count; i++)
+            {
+                nuint id = (nuint)Win32.SendMessage(Handle, NPPM_GETBUFFERIDFROMPOS, (nuint)i, view);
+                if (id != 0)
+                    ids.Add(id);
+            }
+        }
+        return ids;
+    }
 
     public static bool SaveCurrentFile() => Win32.SendMessage(Handle, NPPM_SAVECURRENTFILE, 0, 0) != 0;
 

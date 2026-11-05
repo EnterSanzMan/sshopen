@@ -26,8 +26,14 @@ con el subsistema SFTP (el habitual de OpenSSH).
    La última carpeta visitada se recuerda para la próxima vez.
 2. El fichero se descarga a `%TEMP%\SshOpen\usuario@host_puerto\ruta\remota` y se abre en Notepad++.
 3. Cada vez que lo guardas (Ctrl+S) se sube al servidor. La barra de estado muestra `SFTP: subido ...`.
+   Si el fichero **cambió en el servidor** desde que lo abriste (otra persona lo editó), avisa con la
+   fecha del cambio y pregunta antes de sobrescribirlo.
 4. Si la subida falla, los cambios siguen en la copia local y puedes reintentar.
    **Subir fichero actual al servidor** fuerza la subida a mano.
+5. Conexiones, descargas y subidas muestran una ventana de progreso con **Cancelar**; Notepad++
+   no se bloquea mientras tanto.
+6. Al **arrancar Notepad++** con ficheros remotos de la sesión anterior, ofrece conectar (una vez
+   por cuenta) para comprobar si han cambiado en el servidor y recargar los que lo hayan hecho.
 
 ### Perfiles
 
@@ -59,6 +65,9 @@ mientras Notepad++ siga abierto. La barra de estado indica `(sudo)`.
 - Dos ficheros remotos que solo se diferencien en mayúsculas (`/tmp/A` y `/tmp/a`) comparten la
   misma copia local, porque Windows no los distingue.
 - Los diálogos no siguen el modo oscuro de Notepad++.
+- La detección de cambios en el servidor compara la fecha de modificación (resolución de un
+  segundo): dos escrituras en el mismo segundo no se distinguen.
+- Los comandos de sudo no se pueden cortar a medias: Cancelar espera a que terminen (máximo 60 s).
 
 ## Compilar e instalar
 
@@ -79,7 +88,12 @@ Necesitas el SDK de .NET 10 y Visual Studio o Build Tools con *Desarrollo para e
   WinForms no es compatible con NativeAOT.
 - La transferencia usa SFTP con [SSH.NET](https://github.com/sshnet/SSH.NET) (`src/Sftp.cs`),
   con autenticación por clave y *keyboard-interactive*.
-- La subida automática escucha `NPPN_FILESAVED` (`src/Plugin.cs`).
+- La subida automática escucha `NPPN_FILESAVED`; la comprobación al arrancar, `NPPN_READY` (`src/Plugin.cs`).
+- Las operaciones de red corren en un hilo del *thread pool* mientras el hilo de la interfaz
+  ejecuta el bucle modal del diálogo de progreso (`src/ProgressDialog.cs`); un `Stream` envoltorio
+  cuenta los bytes y corta la transferencia al cancelar.
+- Con cada fichero se guarda la fecha de modificación remota de la última sincronización; antes de
+  subir se vuelve a consultar y, si no coincide, se avisa (`RemoteChangedException`).
 - El acceso con sudo abre un canal de comandos SSH aparte (`src/Sudo.cs`): valida las credenciales
   con `sudo -S -v` y después ejecuta `sudo -n cat | base64` y `sudo -n tee` con el contenido por
   la entrada estándar, de modo que la clave nunca se mezcla con el fichero ni aparece en `ps`.

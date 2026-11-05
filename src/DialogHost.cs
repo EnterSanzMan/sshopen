@@ -10,6 +10,7 @@ namespace SshOpen;
 internal static unsafe class DialogHost
 {
     private static readonly HashSet<string> Registered = [];
+    private static bool _commonControlsReady;
     private static uint _dpi = 96;
     private static IntPtr _savedFocus;
 
@@ -26,6 +27,12 @@ internal static unsafe class DialogHost
     {
         if (IsOpen)
             throw new InvalidOperationException("Ya hay un diálogo de " + Plugin.Name + " abierto.");
+        if (!_commonControlsReady)
+        {
+            var icc = new INITCOMMONCONTROLSEX { dwSize = (uint)sizeof(INITCOMMONCONTROLSEX), dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS };
+            InitCommonControlsEx(&icc);
+            _commonControlsReady = true;
+        }
         Register(className, wndProc);
         _dpi = GetDpi(owner);
         _savedFocus = IntPtr.Zero;
@@ -136,6 +143,14 @@ internal static unsafe class DialogHost
         fixed (char* p = text)
             SetWindowText(GetDlgItem(parent, id), p);
     }
+
+    public static string FormatSize(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:0.#} KB",
+        < 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024):0.#} MB",
+        _ => $"{bytes / (1024.0 * 1024 * 1024):0.#} GB",
+    };
 
     private static void Register(string className, delegate* unmanaged<IntPtr, uint, nuint, nint, nint> wndProc)
     {

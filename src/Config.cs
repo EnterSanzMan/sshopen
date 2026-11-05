@@ -1,5 +1,8 @@
 namespace SshOpen;
 
+/// <summary>Copia local enlazada a un fichero remoto y fecha remota (segundos Unix, 0 = desconocida) de la última sincronización.</summary>
+internal sealed record FileLink(ConnectionRequest Target, long RemoteStamp);
+
 /// <summary>Conexión guardada con nombre (nunca incluye la clave).</summary>
 internal sealed record Profile(string Name, string Host, int Port, string User, string RemotePath)
 {
@@ -16,7 +19,7 @@ internal sealed record Profile(string Name, string Host, int Port, string User, 
 internal static class Config
 {
     private static string? _dir;
-    private static Dictionary<string, ConnectionRequest>? _files;
+    private static Dictionary<string, FileLink>? _files;
 
     private static string Dir => _dir ??= Npp.GetPluginConfigDir();
     private static string IniPath => Path.Combine(Dir, "SshOpen.ini");
@@ -77,28 +80,35 @@ internal static class Config
 
     // --- Ficheros abiertos ---
 
-    public static bool TryGetTarget(string localPath, out ConnectionRequest target) =>
-        Files.TryGetValue(localPath, out target!);
+    public static bool TryGetLink(string localPath, out FileLink link) =>
+        Files.TryGetValue(localPath, out link!);
 
-    public static void MapFile(string localPath, ConnectionRequest r)
+    public static void MapFile(string localPath, ConnectionRequest r, long remoteStamp)
     {
-        Files[localPath] = r.WithoutPassword();
-        Write(FilesPath, Files.Where(kv => File.Exists(kv.Key))
-            .Select(kv => string.Join('\t', kv.Key, kv.Value.Host, kv.Value.Port, kv.Value.User, kv.Value.RemotePath, kv.Value.Sudo ? 1 : 0)));
+        Files[localPath] = new FileLink(r.WithoutPassword(), remoteStamp);
+        Write(FilesPath, Files.Where(kv => File.Exists(kv.Key)).Select(kv =>
+        {
+            var t = kv.Value.Target;
+            return string.Join('\t', kv.Key, t.Host, t.Port, t.User, t.RemotePath, t.Sudo ? 1 : 0, kv.Value.RemoteStamp);
+        }));
     }
 
-    private static Dictionary<string, ConnectionRequest> Files => _files ??= LoadFiles();
+    private static Dictionary<string, FileLink> Files => _files ??= LoadFiles();
 
-    private static Dictionary<string, ConnectionRequest> LoadFiles()
+    private static Dictionary<string, FileLink> LoadFiles()
     {
-        var map = new Dictionary<string, ConnectionRequest>(StringComparer.OrdinalIgnoreCase);
+        var map = new Dictionary<string, FileLink>(StringComparer.OrdinalIgnoreCase);
         if (!File.Exists(FilesPath))
             return map;
         foreach (var line in File.ReadAllLines(FilesPath))
         {
+            // Formatos anteriores: 5 columnas (sin sudo) y 6 (sin fecha remota).
             var f = line.Split('\t');
-            if (f.Length is 5 or 6 && int.TryParse(f[2], out int port))
-                map[f[0]] = new ConnectionRequest(f[1], port, f[3], "", f[4]) { Sudo = f.Length == 6 && f[5] == "1" };
+            if (f.Length is < 5 or > 7 || !int.TryParse(f[2], out int port))
+                continue;
+            var target = new ConnectionRequest(f[1], port, f[3], "", f[4]) { Sudo = f.Length >= 6 && f[5] == "1" };
+            long stamp = f.Length == 7 && long.TryParse(f[6], out long s) ? s : 0;
+            map[f[0]] = new FileLink(target, stamp);
         }
         return map;
     }

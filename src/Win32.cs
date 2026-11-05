@@ -38,6 +38,13 @@ internal unsafe struct WNDCLASSEXW
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct INITCOMMONCONTROLSEX
+{
+    public uint dwSize;
+    public uint dwICC;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct NMHDR
 {
     public IntPtr hwndFrom;
@@ -84,6 +91,13 @@ internal unsafe struct LVITEMW
 /// <summary>P/Invoke mínimo de user32/gdi32/kernel32 (sin WinForms: no es compatible con NativeAOT).</summary>
 internal static unsafe partial class Win32
 {
+    public const uint WM_TIMER = 0x0113;
+    public const int GWL_STYLE = -16;
+
+    // Barra de progreso (comctl32)
+    public const uint PBS_MARQUEE = 0x08, PBM_SETPOS = 0x0402, PBM_SETRANGE32 = 0x0406, PBM_SETMARQUEE = 0x040A;
+    public const uint ICC_LISTVIEW_CLASSES = 0x1, ICC_PROGRESS_CLASS = 0x20;
+
     public const uint WM_ACTIVATE = 0x0006, WM_CLOSE = 0x0010, WM_SETFONT = 0x0030, WM_COMMAND = 0x0111, DM_GETDEFID = 0x0400;
     public const uint WS_POPUP = 0x80000000, WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000;
     public const uint WS_CAPTION = 0x00C00000, WS_SYSMENU = 0x00080000, WS_TABSTOP = 0x00010000;
@@ -168,6 +182,21 @@ internal static unsafe partial class Win32
 
     [LibraryImport("user32.dll")]
     public static partial int IsChild(IntPtr parent, IntPtr hWnd);
+
+    [LibraryImport("user32.dll")]
+    public static partial nuint SetTimer(IntPtr hWnd, nuint id, uint elapseMs, IntPtr proc);
+
+    [LibraryImport("user32.dll")]
+    public static partial int KillTimer(IntPtr hWnd, nuint id);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    public static partial nint GetWindowLongPtr(IntPtr hWnd, int index);
+
+    [LibraryImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    public static partial nint SetWindowLongPtr(IntPtr hWnd, int index, nint value);
+
+    [LibraryImport("comctl32.dll")]
+    public static partial int InitCommonControlsEx(INITCOMMONCONTROLSEX* icc);
 
     [LibraryImport("kernel32.dll", EntryPoint = "GetLongPathNameW", StringMarshalling = StringMarshalling.Utf16)]
     public static partial uint GetLongPathName(string shortPath, char* buffer, uint bufferLength);

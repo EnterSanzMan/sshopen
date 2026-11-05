@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using Renci.SshNet;
 using Renci.SshNet.Common;
 
 namespace SshOpen;
@@ -17,7 +18,13 @@ internal static class Plugin
 
     // Copias locales cuya última subida falló o se canceló.
     private static readonly HashSet<string> PendingUpload = new(StringComparer.OrdinalIgnoreCase);
+
+    // Cuentas para las que el usuario ya aceptó usar sudo en esta sesión.
+    private static readonly HashSet<string> SudoAccounts = new(StringComparer.Ordinal);
+
     private static bool _suppressAutoUpload;
+
+    // --- Abrir ---
 
     public static void OpenRemote()
     {
@@ -34,7 +41,9 @@ internal static class Plugin
 
             try
             {
-                using var client = ConnectWithWaitCursor(request);
+                using var client = ConnectInteractive(request);
+                if (client is null)
+                    continue;
                 Passwords[request.Account] = request.Password;
 
                 // Siempre se navega con el explorador. Si la ruta es un fichero, se empieza en su
@@ -55,13 +64,14 @@ internal static class Plugin
 
                 var target = request with { RemotePath = path };
                 string localPath = LocalPathFor(target);
+                long stamp = Config.TryGetLink(localPath, out var link) ? link.RemoteStamp : 0;
                 if (!HasUnsyncedChanges(client, path, localPath) || ConfirmOverwriteLocal(path))
                 {
-                    target = Download(client, target, localPath);
+                    (target, stamp) = Download(client, target, localPath);
                     PendingUpload.Remove(localPath);
                 }
 
-                Config.MapFile(localPath, target);
+                Config.MapFile(localPath, target, stamp);
                 Npp.OpenFile(localPath);
                 Npp.SetStatus($"SFTP: abierto {target.Display}{(target.Sudo ? " (sudo)" : "")}");
                 return;
@@ -79,25 +89,53 @@ internal static class Plugin
         }
     }
 
-    /// <summary>Descarga por SFTP; sin permiso de lectura ofrece hacerlo con sudo.</summary>
-    private static ConnectionRequest Download(Renci.SshNet.SftpClient client, ConnectionRequest target, string localPath)
+    /// <summary>
+    /// Conecta mostrando progreso; si la huella del servidor no está aceptada la enseña y, si el
+    /// usuario la acepta, la guarda y reintenta. Devuelve null si la rechaza.
+    /// </summary>
+    private static SftpClient? ConnectInteractive(ConnectionRequest request)
     {
-        try
+        while (true)
         {
-            using (new WaitCursor())
-                Sftp.Download(client, target.RemotePath, localPath);
-            return target with { Sudo = false };
-        }
-        catch (SftpPermissionDeniedException) when (AskSudo(target, "leer"))
-        {
-            using (new WaitCursor())
-                Sudo.Download(target, localPath);
-            return target with { Sudo = true };
+            try
+            {
+                return ProgressDialog.Run(Npp.Handle, $"Conectando con {request.User}@{request.Host}:{request.Port}...",
+                    p => Sftp.Connect(request, p.Token));
+            }
+            catch (UntrustedHostKeyException e)
+            {
+                if (!AskTrust(request, e))
+                    return null;
+                Config.TrustHost(request.Host, request.Port, e.Fingerprint);
+            }
         }
     }
 
-    // Cuentas para las que el usuario ya aceptó usar sudo en esta sesión.
-    private static readonly HashSet<string> SudoAccounts = new(StringComparer.Ordinal);
+    private static bool AskTrust(ConnectionRequest r, UntrustedHostKeyException e)
+    {
+        string text = e.Known == null
+            ? $"Es la primera vez que te conectas a {r.Host}:{r.Port}.\n\nHuella del servidor:\n{e.Fingerprint}\n\n¿Confiar en este servidor?"
+            : $"¡ATENCIÓN! La huella de {r.Host}:{r.Port} ha CAMBIADO.\n\nGuardada:\n{e.Known}\n\nRecibida:\n{e.Fingerprint}\n\n" +
+              "Puede ser una reinstalación del servidor o un ataque man-in-the-middle.\n¿Confiar en la nueva huella?";
+        uint flags = Win32.MB_YESNO | (e.Known == null ? Win32.MB_ICONQUESTION : Win32.MB_ICONWARNING | Win32.MB_DEFBUTTON2);
+        return Win32.MessageBox(Npp.Handle, text, Name, flags) == Win32.IDYES;
+    }
+
+    /// <summary>Descarga por SFTP; sin permiso de lectura ofrece hacerlo con sudo. Devuelve el destino y la fecha remota.</summary>
+    private static (ConnectionRequest Target, long Stamp) Download(SftpClient client, ConnectionRequest target, string localPath)
+    {
+        string title = "Descargando " + target.RemotePath;
+        try
+        {
+            long stamp = ProgressDialog.Run(Npp.Handle, title, p => Sftp.Download(client, target.RemotePath, localPath, p));
+            return (target with { Sudo = false }, stamp);
+        }
+        catch (SftpPermissionDeniedException) when (AskSudo(target, "leer"))
+        {
+            long stamp = ProgressDialog.Run(Npp.Handle, title + " (sudo)", p => Sudo.Download(target, localPath, p));
+            return (target with { Sudo = true }, stamp);
+        }
+    }
 
     private static bool AskSudo(ConnectionRequest r, string action)
     {
@@ -113,7 +151,7 @@ internal static class Plugin
         return true;
     }
 
-    private static bool IsFile(Renci.SshNet.SftpClient client, string path)
+    private static bool IsFile(SftpClient client, string path)
     {
         try
         {
@@ -129,13 +167,14 @@ internal static class Plugin
     /// La copia local tiene cambios que no llegaron al servidor: lo sabemos de esta sesión, o la
     /// copia es claramente más reciente que el fichero remoto (margen por desfase de relojes).
     /// </summary>
-    private static bool HasUnsyncedChanges(Renci.SshNet.SftpClient client, string remotePath, string localPath)
+    private static bool HasUnsyncedChanges(SftpClient client, string remotePath, string localPath)
     {
         if (!File.Exists(localPath))
             return false;
         if (PendingUpload.Contains(localPath))
             return true;
-        return File.GetLastWriteTimeUtc(localPath) > client.GetLastWriteTimeUtc(remotePath).AddMinutes(2);
+        long remote = Sftp.GetStamp(client, remotePath);
+        return remote != 0 && Sftp.Stamp(File.GetLastWriteTimeUtc(localPath)) > remote + 120;
     }
 
     private static bool ConfirmOverwriteLocal(string remotePath) =>
@@ -145,11 +184,7 @@ internal static class Plugin
             "Sí: se pierden los cambios locales.\nNo: se abre la copia local tal cual (podrás subirla al guardar).",
             Name, Win32.MB_YESNO | Win32.MB_ICONWARNING | Win32.MB_DEFBUTTON2) == Win32.IDYES;
 
-    private static Renci.SshNet.SftpClient ConnectWithWaitCursor(ConnectionRequest r)
-    {
-        using (new WaitCursor())
-            return Sftp.Connect(r);
-    }
+    // --- Guardar / subir ---
 
     public static void OnFileSaved(nuint bufferId)
     {
@@ -158,14 +193,14 @@ internal static class Plugin
         if (_suppressAutoUpload || DialogHost.IsOpen)
             return;
         string? path = Npp.GetBufferPath(bufferId);
-        if (path != null && Config.TryGetTarget(path, out var target))
-            Upload(path, target);
+        if (path != null && Config.TryGetLink(path, out var link))
+            Upload(path, link);
     }
 
     public static void UploadCurrent()
     {
         string? path = Npp.GetBufferPath(Npp.CurrentBufferId);
-        if (path == null || !Config.TryGetTarget(path, out var target))
+        if (path == null || !Config.TryGetLink(path, out var link))
         {
             Win32.MessageBox(Npp.Handle, "El fichero actual no se abrió con " + Name + ".", Name, Win32.MB_ICONINFORMATION);
             return;
@@ -186,28 +221,14 @@ internal static class Plugin
             Win32.MessageBox(Npp.Handle, "No se pudo guardar la copia local, así que no se ha subido nada.", Name, Win32.MB_ICONWARNING);
             return;
         }
-        Upload(path, target);
+        Upload(path, link);
     }
 
-    public static void About()
+    private static void Upload(string localPath, FileLink link)
     {
-        Win32.MessageBox(Npp.Handle,
-            Name + "\n\n" +
-            "Abre ficheros de un servidor Linux por SSH (SFTP) indicando IP, usuario y clave.\n\n" +
-            "• Al conectar se muestran las carpetas y ficheros para navegar hasta el fichero:\n" +
-            "   doble clic o Intro para entrar o abrir, Retroceso para subir de carpeta.\n" +
-            "• El fichero se descarga a una copia en %TEMP%\\SshOpen.\n" +
-            "• Al guardar (Ctrl+S) se sube automáticamente al servidor.\n" +
-            "• Si el usuario no tiene permiso sobre el fichero, ofrece leerlo y escribirlo con sudo.\n" +
-            "• Los perfiles guardan servidor, puerto, usuario y carpeta (nunca la clave).\n" +
-            "• La clave solo se guarda en memoria mientras Notepad++ está abierto.\n" +
-            "• La huella del servidor se pide la primera vez y se recuerda.",
-            Name, Win32.MB_ICONINFORMATION);
-    }
-
-    private static void Upload(string localPath, ConnectionRequest target)
-    {
-        var request = WithKnownPassword(target);
+        var request = WithKnownPassword(link.Target);
+        long expected = link.RemoteStamp;
+        bool force = false;
         while (true)
         {
             if (!Passwords.ContainsKey(request.Account))
@@ -216,8 +237,7 @@ internal static class Plugin
                     "Subir", request, options: null);
                 if (r is null)
                 {
-                    PendingUpload.Add(localPath);
-                    Npp.SetStatus("SFTP: subida cancelada, los cambios solo están en la copia local");
+                    GiveUpUpload(localPath, "subida cancelada");
                     return;
                 }
                 request = r with { Sudo = request.Sudo };
@@ -225,23 +245,36 @@ internal static class Plugin
 
             try
             {
-                using (new WaitCursor())
-                {
-                    if (request.Sudo)
-                        Sudo.Upload(request, localPath);
-                    else
-                        Sftp.Upload(request, localPath);
-                }
+                string title = $"Subiendo {request.RemotePath}{(request.Sudo ? " (sudo)" : "")}";
+                var req = request; // copia estable para el hilo de trabajo
+                bool f = force;
+                long stamp = ProgressDialog.Run(Npp.Handle, title, p => req.Sudo
+                    ? Sudo.Upload(req, localPath, p, expected, f)
+                    : Sftp.Upload(req, localPath, p, expected, f));
+
+                PendingUpload.Remove(localPath);
+                Passwords[request.Account] = request.Password;
+                Config.MapFile(localPath, request, stamp);
+                Npp.SetStatus($"SFTP: subido {request.Display}{(request.Sudo ? " (sudo)" : "")} ({DateTime.Now:HH:mm:ss})");
+                return;
             }
             catch (SftpPermissionDeniedException) when (!request.Sudo && AskSudo(request, "escribir en"))
             {
                 request = request with { Sudo = true };
-                continue;
+            }
+            catch (RemoteChangedException e)
+            {
+                if (ConfirmOverwriteRemote(request, e.Current))
+                {
+                    force = true;
+                    continue;
+                }
+                GiveUpUpload(localPath, "no se ha subido");
+                return;
             }
             catch (OperationCanceledException)
             {
-                PendingUpload.Add(localPath);
-                Npp.SetStatus("SFTP: subida cancelada, los cambios solo están en la copia local");
+                GiveUpUpload(localPath, "subida cancelada");
                 return;
             }
             catch (Exception ex)
@@ -253,17 +286,136 @@ internal static class Plugin
                     Name, Win32.MB_RETRYCANCEL | Win32.MB_ICONERROR);
                 if (answer == Win32.IDRETRY)
                     continue;
-                PendingUpload.Add(localPath);
+                GiveUpUpload(localPath, "no se ha subido");
                 return;
             }
-
-            PendingUpload.Remove(localPath);
-            Passwords[request.Account] = request.Password;
-            if (request.WithoutPassword() != target)
-                Config.MapFile(localPath, request);
-            Npp.SetStatus($"SFTP: subido {request.Display}{(request.Sudo ? " (sudo)" : "")} ({DateTime.Now:HH:mm:ss})");
-            return;
         }
+    }
+
+    private static void GiveUpUpload(string localPath, string reason)
+    {
+        PendingUpload.Add(localPath);
+        Npp.SetStatus($"SFTP: {reason}, los cambios solo están en la copia local");
+    }
+
+    private static bool ConfirmOverwriteRemote(ConnectionRequest r, long current)
+    {
+        string text = current == 0
+            ? $"{r.RemotePath} ya no existe en el servidor.\n\n¿Crearlo de nuevo con tu copia?"
+            : $"{r.RemotePath} ha cambiado en el servidor desde que lo abriste\n(modificado el {Sftp.LocalTime(current):dd/MM/yyyy HH:mm:ss}).\n\n" +
+              "Si lo subes se perderán esos cambios.\n\n¿Sobrescribir el fichero del servidor?\n\n" +
+              "No: tus cambios quedan en la copia local; con Ctrl+Alt+O puedes ver la versión del servidor.";
+        return Win32.MessageBox(Npp.Handle, text, Name, Win32.MB_YESNO | Win32.MB_ICONWARNING | Win32.MB_DEFBUTTON2) == Win32.IDYES;
+    }
+
+    // --- Arranque de Notepad++ ---
+
+    /// <summary>
+    /// Notepad++ restauró la sesión anterior: para los ficheros remotos que siguen abiertos,
+    /// ofrece conectar (una vez por cuenta) y comprobar si cambiaron en el servidor.
+    /// </summary>
+    public static void OnReady()
+    {
+        var links = new List<(string LocalPath, FileLink Link)>();
+        foreach (nuint id in Npp.OpenBufferIds())
+        {
+            string? path = Npp.GetBufferPath(id);
+            if (path != null && Config.TryGetLink(path, out var link))
+                links.Add((path, link));
+        }
+
+        foreach (var group in links.GroupBy(l => l.Link.Target.Account))
+        {
+            var files = group.ToList();
+            var request = WithKnownPassword(files[0].Link.Target);
+            string list = string.Join("\n", files.Select(f => "  " + f.Link.Target.RemotePath));
+            int answer = Win32.MessageBox(Npp.Handle,
+                $"Hay {files.Count} fichero(s) remoto(s) de la sesión anterior en {group.Key}:\n\n{list}\n\n" +
+                "¿Conectar ahora para comprobar si han cambiado en el servidor?\n\nSi no, se pedirá la clave al guardar.",
+                Name, Win32.MB_YESNO | Win32.MB_ICONQUESTION);
+            if (answer != Win32.IDYES)
+                continue;
+
+            if (!Passwords.ContainsKey(request.Account))
+            {
+                var r = ConnectDialog.Show(Npp.Handle, "Conectar con " + group.Key, "Conectar", request, options: null);
+                if (r is null)
+                    continue;
+                request = r;
+            }
+
+            try
+            {
+                using var client = ConnectInteractive(request);
+                if (client is null)
+                    continue;
+                Passwords[request.Account] = request.Password;
+                int unchanged = 0;
+                foreach (var (localPath, link) in files)
+                    if (!RefreshIfChanged(client, localPath, link))
+                        unchanged++;
+                Npp.SetStatus($"SFTP: {group.Key} comprobado, {unchanged} de {files.Count} fichero(s) sin cambios en el servidor");
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                if (ex is SshAuthenticationException)
+                    Passwords.Remove(request.Account);
+                ShowError("No se pudo comprobar " + group.Key, ex);
+            }
+        }
+    }
+
+    /// <summary>Si el fichero remoto cambió desde la última sincronización, ofrece descargarlo y recargarlo. True si cambió.</summary>
+    private static bool RefreshIfChanged(SftpClient client, string localPath, FileLink link)
+    {
+        long current = Sftp.GetStamp(client, link.Target.RemotePath);
+        if (link.RemoteStamp == 0 || current == 0 || current == link.RemoteStamp)
+            return false;
+
+        int answer = Win32.MessageBox(Npp.Handle,
+            $"{link.Target.RemotePath} ha cambiado en el servidor\n(modificado el {Sftp.LocalTime(current):dd/MM/yyyy HH:mm:ss}).\n\n" +
+            "¿Descargar la nueva versión? La copia local abierta en Notepad++ se sustituirá.",
+            Name, Win32.MB_YESNO | Win32.MB_ICONQUESTION);
+        if (answer != Win32.IDYES)
+            return true;
+
+        try
+        {
+            var (target, stamp) = Download(client, link.Target, localPath);
+            Config.MapFile(localPath, target, stamp);
+            PendingUpload.Remove(localPath);
+            Npp.ReloadFile(localPath);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            ShowError("No se pudo descargar " + link.Target.RemotePath, ex);
+        }
+        return true;
+    }
+
+    // --- Varios ---
+
+    public static void About()
+    {
+        Win32.MessageBox(Npp.Handle,
+            Name + "\n\n" +
+            "Abre ficheros de un servidor Linux por SSH (SFTP) indicando IP, usuario y clave.\n\n" +
+            "• Al conectar se muestran las carpetas y ficheros para navegar hasta el fichero:\n" +
+            "   doble clic o Intro para entrar o abrir, Retroceso para subir de carpeta.\n" +
+            "• El fichero se descarga a una copia en %TEMP%\\SshOpen.\n" +
+            "• Al guardar (Ctrl+S) se sube automáticamente al servidor; si el fichero cambió\n" +
+            "   en el servidor desde que lo abriste, avisa antes de sobrescribirlo.\n" +
+            "• Si el usuario no tiene permiso sobre el fichero, ofrece leerlo y escribirlo con sudo.\n" +
+            "• Los perfiles guardan servidor, puerto, usuario y carpeta (nunca la clave).\n" +
+            "• La clave solo se guarda en memoria mientras Notepad++ está abierto.\n" +
+            "• La huella del servidor se pide la primera vez y se recuerda.",
+            Name, Win32.MB_ICONINFORMATION);
     }
 
     private static ConnectionRequest WithKnownPassword(ConnectionRequest r) =>
@@ -306,6 +458,7 @@ internal static class Plugin
         SftpPathNotFoundException => "La ruta remota no existe.",
         SftpPermissionDeniedException => "Permiso denegado en el servidor.",
         SshOperationTimeoutException => "Tiempo de espera agotado.",
+        UntrustedHostKeyException => "La huella del servidor no está aceptada o ha cambiado: ábrelo con Ctrl+Alt+O para revisarla.",
         SocketException se => "No se puede conectar con el servidor: " + se.Message,
         SshConnectionException sc => "Error de conexión SSH: " + sc.Message,
         _ => ex.Message,

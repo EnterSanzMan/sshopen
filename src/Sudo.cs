@@ -6,26 +6,44 @@ namespace SshOpen;
 /// <summary>
 /// Lectura y escritura de ficheros como root cuando SFTP devuelve "permiso denegado": se ejecuta
 /// <c>sudo cat</c> / <c>sudo tee</c> por un canal de comandos SSH, con la misma clave del usuario.
+/// Los comandos no admiten cancelación a medias: Cancelar espera a que terminen (máximo 60 s).
 /// </summary>
 internal static class Sudo
 {
-    public static void Download(ConnectionRequest r, string localPath)
+    /// <summary>Descarga el fichero y devuelve su fecha de modificación remota (segundos Unix).</summary>
+    public static long Download(ConnectionRequest r, string localPath, TransferProgress progress)
     {
-        using var ssh = Sftp.ConnectSsh(r);
+        using var ssh = Sftp.ConnectSsh(r, progress.Token);
         Authorize(ssh, r.Password);
+        long stamp = Stat(ssh, r.RemotePath);
         // base64 para que el contenido pase intacto por la salida de texto del comando.
         string output = Run(ssh, "sudo -n cat -- " + Sftp.ShellQuote(r.RemotePath) + " | base64 -w0", null);
         byte[] bytes = Convert.FromBase64String(output.Trim());
-        Sftp.WriteLocal(localPath, file => file.Write(bytes));
+        progress.Start(bytes.Length);
+        Sftp.WriteLocal(localPath, file => new ProgressStream(file, progress).Write(bytes, 0, bytes.Length));
+        return stamp;
     }
 
-    public static void Upload(ConnectionRequest r, string localPath)
+    /// <summary>Sube la copia local con la misma comprobación de cambios que <see cref="Sftp.Upload"/>.</summary>
+    public static long Upload(ConnectionRequest r, string localPath, TransferProgress progress, long expectedStamp, bool force)
     {
-        using var ssh = Sftp.ConnectSsh(r);
+        using var ssh = Sftp.ConnectSsh(r, progress.Token);
         Authorize(ssh, r.Password);
+        if (!force)
+            Sftp.CheckUnchanged(Stat(ssh, r.RemotePath), expectedStamp);
         using var file = File.OpenRead(localPath);
+        progress.Start(file.Length);
         // tee sobrescribe en el sitio: conserva propietario y permisos del fichero.
-        Run(ssh, "sudo -n tee -- " + Sftp.ShellQuote(r.RemotePath) + " > /dev/null", file);
+        Run(ssh, "sudo -n tee -- " + Sftp.ShellQuote(r.RemotePath) + " > /dev/null", new ProgressStream(file, progress));
+        return Stat(ssh, r.RemotePath);
+    }
+
+    /// <summary>Fecha de modificación (segundos Unix) vía <c>stat</c>; 0 si no existe.</summary>
+    private static long Stat(SshClient ssh, string path)
+    {
+        using var cmd = ssh.CreateCommand("sudo -n stat -c %Y -- " + Sftp.ShellQuote(path));
+        string output = cmd.Execute();
+        return cmd.ExitStatus == 0 && long.TryParse(output.Trim(), out long stamp) ? stamp : 0;
     }
 
     /// <summary>

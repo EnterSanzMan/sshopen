@@ -40,10 +40,18 @@ internal static unsafe class Exports
     [UnmanagedCallersOnly(EntryPoint = "beNotified")]
     private static void BeNotified(NotifyHeader* header)
     {
-        if (header->Code != Npp.NPPN_FILESAVED || header->HwndFrom != Npp.Handle)
+        if (header->HwndFrom != Npp.Handle)
             return;
-        nuint bufferId = header->IdFrom;
-        Commands.Guard(() => Plugin.OnFileSaved(bufferId));
+        switch (header->Code)
+        {
+            case Npp.NPPN_READY:
+                Commands.Guard(Plugin.OnReady);
+                break;
+            case Npp.NPPN_FILESAVED:
+                nuint bufferId = header->IdFrom;
+                Commands.Guard(() => Plugin.OnFileSaved(bufferId));
+                break;
+        }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "messageProc")]
