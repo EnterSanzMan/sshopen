@@ -142,7 +142,7 @@ internal static unsafe class BrowseDialog
         }
         catch (Exception ex)
         {
-            Plugin.ShowError(hwnd, "Error en el explorador remoto", ex);
+            Prompts.Error(hwnd, "Error en el explorador remoto", ex);
         }
         return DefWindowProc(hwnd, msg, wParam, lParam);
     }
@@ -165,7 +165,7 @@ internal static unsafe class BrowseDialog
         }
         catch (Exception ex)
         {
-            Plugin.ShowError(_hwnd, "No se puede acceder a " + path, ex);
+            Prompts.Error(_hwnd, "No se puede acceder a " + path, ex);
         }
     }
 
@@ -188,7 +188,7 @@ internal static unsafe class BrowseDialog
             }
             catch (Exception ex)
             {
-                Plugin.ShowError(_hwnd, "El enlace " + entry.FullName + " no es accesible", ex);
+                Prompts.Error(_hwnd, "El enlace " + entry.FullName + " no es accesible", ex);
                 return;
             }
         }
@@ -221,7 +221,7 @@ internal static unsafe class BrowseDialog
         catch (Exception ex)
         {
             if (showError)
-                Plugin.ShowError(_hwnd, "No se puede listar " + folder, ex);
+                Prompts.Error(_hwnd, "No se puede listar " + folder, ex);
             return false;
         }
 

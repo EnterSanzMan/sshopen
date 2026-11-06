@@ -27,16 +27,11 @@ internal static unsafe class DialogHost
     {
         if (IsOpen)
             throw new InvalidOperationException("Ya hay un diálogo de " + Plugin.Name + " abierto.");
-        if (!_commonControlsReady)
-        {
-            var icc = new INITCOMMONCONTROLSEX { dwSize = (uint)sizeof(INITCOMMONCONTROLSEX), dwICC = ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS };
-            InitCommonControlsEx(&icc);
-            _commonControlsReady = true;
-        }
-        Register(className, wndProc);
-        _dpi = GetDpi(owner);
+        EnsureCommonControls();
+        RegisterClass(className, wndProc);
+        _dpi = DpiOf(owner);
         _savedFocus = IntPtr.Zero;
-        Font = CreateFont(-S(12), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI");
+        Font = CreateUiFont(_dpi);
 
         const uint style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
         const uint exStyle = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
@@ -75,7 +70,26 @@ internal static unsafe class DialogHost
         SetFocus(_savedFocus != IntPtr.Zero && IsChild(hwnd, _savedFocus) != 0 ? _savedFocus : fallback);
     }
 
-    private static uint GetDpi(IntPtr hwnd)
+    /// <summary>Lista, árbol y barra de progreso: se registran una vez para todo el plugin.</summary>
+    public static void EnsureCommonControls()
+    {
+        if (_commonControlsReady)
+            return;
+        var icc = new INITCOMMONCONTROLSEX
+        {
+            dwSize = (uint)sizeof(INITCOMMONCONTROLSEX),
+            dwICC = ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_PROGRESS_CLASS,
+        };
+        InitCommonControlsEx(&icc);
+        _commonControlsReady = true;
+    }
+
+    /// <summary>Fuente de la interfaz (Segoe UI 9 pt) para ese DPI; quien la crea la libera.</summary>
+    public static IntPtr CreateUiFont(uint dpi) =>
+        CreateFont(-(int)(12 * dpi / 96), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI");
+
+    /// <summary>DPI del monitor de la ventana (96 en Windows anteriores a 10 1607).</summary>
+    public static uint DpiOf(IntPtr hwnd)
     {
         try
         {
@@ -161,7 +175,8 @@ internal static unsafe class DialogHost
         _ => $"{bytes / (1024.0 * 1024 * 1024):0.#} GB",
     };
 
-    private static void Register(string className, delegate* unmanaged<IntPtr, uint, nuint, nint, nint> wndProc)
+    /// <summary>Registra una clase de ventana del plugin (una sola vez por nombre).</summary>
+    public static void RegisterClass(string className, delegate* unmanaged<IntPtr, uint, nuint, nint, nint> wndProc)
     {
         if (!Registered.Add(className))
             return;

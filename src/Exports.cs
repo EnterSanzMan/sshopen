@@ -95,7 +95,7 @@ internal static class Commands
     public static void TogglePanel() => Guard(() => RemotePanel.Toggle());
 
     [UnmanagedCallersOnly]
-    public static void About() => Guard(Plugin.About);
+    public static void About() => Guard(Prompts.About);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static void Guard(Action action)
@@ -106,7 +106,7 @@ internal static class Commands
         }
         catch (Exception ex)
         {
-            Plugin.ShowError("Error inesperado", ex);
+            Prompts.Error("Error inesperado", ex);
         }
     }
 }

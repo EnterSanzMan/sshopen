@@ -150,6 +150,11 @@ Para que aparezca en *Plugins → Administrador de plugins*:
   `src/BrowseDialog.cs`, `src/RemotePanel.cs`): WinForms no es compatible con NativeAOT. Siguen el
   modo oscuro de Notepad++ (`NPPM_DARKMODESUBCLASSANDTHEME`, Notepad++ 8.5.4 o posterior).
 - El panel se registra con `NPPM_DMMREGASDCKDLG`; Notepad++ recuerda dónde estaba acoplado.
+  Su árbol está en `src/RemoteTree.cs` y su conexión persistente, con reconexión, en
+  `src/PanelConnection.cs`.
+- `src/Plugin.cs` orquesta abrir, subir y comprobar al arrancar. Se apoya en `src/Connector.cs`
+  (diálogo, progreso, huella y reintento al conectar), `src/Credentials.cs` (secretos en memoria),
+  `src/LocalCopies.cs` (copias en `%TEMP%`) y `src/Prompts.cs` (todas las preguntas y errores).
 - La transferencia usa SFTP con [SSH.NET](https://github.com/sshnet/SSH.NET) (`src/Sftp.cs`),
   con autenticación por clave privada, contraseña y *keyboard-interactive*.
 - La subida automática escucha `NPPN_FILESAVED`; la comprobación al arrancar, `NPPN_READY` (`src/Plugin.cs`).

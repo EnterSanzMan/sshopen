@@ -144,7 +144,7 @@ internal static unsafe class ProgressDialog
         }
         catch (Exception ex)
         {
-            Plugin.ShowError(hwnd, "Error en el diálogo de progreso", ex);
+            Prompts.Error(hwnd, "Error en el diálogo de progreso", ex);
         }
         return DefWindowProc(hwnd, msg, wParam, lParam);
     }

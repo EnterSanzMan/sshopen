@@ -1,4 +1,3 @@
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using Renci.SshNet;
 using Renci.SshNet.Common;
@@ -7,9 +6,9 @@ using static SshOpen.Win32;
 namespace SshOpen;
 
 /// <summary>
-/// Panel acoplable de Notepad++ con el árbol de carpetas del servidor. Mantiene una conexión
-/// SFTP abierta mientras está conectado; las carpetas se cargan al desplegarlas.
-/// Doble clic o Intro sobre un fichero lo abre; F5 recarga la carpeta seleccionada.
+/// Panel acoplable de Notepad++ con el árbol de carpetas del servidor (<see cref="RemoteTree"/>)
+/// y una conexión abierta mientras está conectado (<see cref="PanelConnection"/>). Las carpetas
+/// se cargan al desplegarlas. Doble clic o Intro sobre un fichero lo abre; F5 recarga.
 ///
 /// Reentrada: las operaciones de red muestran diálogos modales (progreso, huella, errores) que
 /// bombean mensajes. Por eso nada se hace dentro de una notificación del TreeView (se aplaza con
@@ -23,26 +22,15 @@ internal static unsafe class RemotePanel
     private const int IdConnect = 301, IdRefresh = 302, IdDisconnect = 303, IdStatus = 304, IdHidden = 305, IdTree = 306;
     private const string ClassName = "SshOpenPanel";
 
-    // Acciones aplazadas; wParam = id del nodo.
+    // Acciones aplazadas; wParam = Id del nodo.
     private const uint WM_EXPAND_NODE = WM_APP + 1, WM_OPEN_NODE = WM_APP + 2, WM_REFRESH = WM_APP + 3;
 
-    private sealed class Node(string path, bool isDirectory)
-    {
-        public string Path { get; } = path;
-        public bool IsDirectory { get; } = isDirectory;
-        public bool Loaded { get; set; }
-        public IntPtr Item { get; set; }
-    }
-
-    private static IntPtr _hwnd, _tree, _font;
+    private static IntPtr _hwnd, _font;
+    private static RemoteTree? _tree;
     private static TbData* _tbData;
     private static uint _dpi = 96;
     private static bool _visible, _busy;
-
-    private static SftpClient? _client;
-    private static ConnectionRequest? _request;
-    private static readonly Dictionary<nint, Node> Nodes = [];
-    private static nint _nextId = 1;
+    private static readonly PanelConnection Connection = new(onLost: ShowDisconnected);
 
     private static int S(int value) => (int)(value * _dpi / 96);
 
@@ -78,40 +66,17 @@ internal static unsafe class RemotePanel
     /// <summary>Notepad++ se cierra: se suelta la conexión.</summary>
     public static void Shutdown()
     {
-        DropConnection();
+        Connection.Close();
         if (_hwnd != IntPtr.Zero)
             Npp.RegisterModeless(_hwnd, add: false);
     }
 
     private static void Create()
     {
-        var icc = new INITCOMMONCONTROLSEX { dwSize = (uint)sizeof(INITCOMMONCONTROLSEX), dwICC = ICC_TREEVIEW_CLASSES };
-        InitCommonControlsEx(&icc);
-
-        fixed (char* name = ClassName)
-        {
-            var wc = new WNDCLASSEXW
-            {
-                cbSize = (uint)sizeof(WNDCLASSEXW),
-                lpfnWndProc = &WndProc,
-                hInstance = GetModuleHandle(null),
-                hCursor = LoadCursor(IntPtr.Zero, IDC_ARROW),
-                hbrBackground = COLOR_BTNFACE + 1,
-                lpszClassName = name,
-            };
-            RegisterClassEx(&wc);
-        }
-
-        try
-        {
-            uint dpi = GetDpiForWindow(Npp.Handle);
-            _dpi = dpi == 0 ? 96 : dpi;
-        }
-        catch (EntryPointNotFoundException)
-        {
-            _dpi = 96;
-        }
-        _font = CreateFont(-S(12), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI");
+        DialogHost.EnsureCommonControls();
+        DialogHost.RegisterClass(ClassName, &WndProc);
+        _dpi = DialogHost.DpiOf(Npp.Handle);
+        _font = DialogHost.CreateUiFont(_dpi);
 
         // Ventana hija oculta: el gestor de paneles de Notepad++ la recoloca y la muestra.
         _hwnd = CreateWindowEx(WS_EX_CONTROLPARENT, ClassName, Plugin.Name, WS_CHILD | WS_CLIPCHILDREN,
@@ -125,8 +90,8 @@ internal static unsafe class RemotePanel
         Control("STATIC", "Sin conexión", SS_ENDELLIPSIS | SS_NOPREFIX, IdStatus);
         Control("BUTTON", "Ocultos", WS_TABSTOP | BS_AUTOCHECKBOX, IdHidden);
         SyncHiddenCheckbox();
-        _tree = Control("SysTreeView32", "",
-            WS_TABSTOP | WS_BORDER | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, IdTree);
+        _tree = new RemoteTree(Control("SysTreeView32", "",
+            WS_TABSTOP | WS_BORDER | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, IdTree));
         UpdateButtons();
 
         // Registro como panel acoplable. La estructura y sus cadenas deben vivir siempre.
@@ -161,8 +126,10 @@ internal static unsafe class RemotePanel
         MoveWindow(GetDlgItem(_hwnd, IdHidden), width - pad - checkWidth, y, checkWidth, S(22), 1);
 
         y += S(22) + pad;
-        MoveWindow(_tree, pad, y, Math.Max(0, width - 2 * pad), Math.Max(0, height - y - pad), 1);
+        MoveWindow(GetDlgItem(_hwnd, IdTree), pad, y, Math.Max(0, width - 2 * pad), Math.Max(0, height - y - pad), 1);
     }
+
+    // --- Mensajes ---
 
     [UnmanagedCallersOnly]
     private static nint WndProc(IntPtr hwnd, uint msg, nuint wParam, nint lParam)
@@ -188,7 +155,7 @@ internal static unsafe class RemotePanel
                 case WM_EXPAND_NODE:
                 case WM_OPEN_NODE:
                 case WM_REFRESH:
-                    if (!Busy && Nodes.TryGetValue((nint)wParam, out var node))
+                    if (!Busy && _tree?.FromId((nint)wParam) is { } node)
                         RunBusy(() =>
                         {
                             if (msg == WM_EXPAND_NODE) Expand(node);
@@ -200,7 +167,7 @@ internal static unsafe class RemotePanel
         }
         catch (Exception ex)
         {
-            Plugin.ShowError("Error en el panel remoto", ex);
+            Prompts.Error("Error en el panel remoto", ex);
         }
         return DefWindowProc(hwnd, msg, wParam, lParam);
     }
@@ -217,7 +184,7 @@ internal static unsafe class RemotePanel
         if (id == IDOK)
         {
             // Intro (vía IsDialogMessage) con el foco en el árbol.
-            if (GetFocus() == _tree && SelectedNode() is { } node)
+            if (_tree != null && GetFocus() == _tree.Handle && _tree.Selected is { } node)
                 Post(node.IsDirectory ? WM_EXPAND_NODE : WM_OPEN_NODE, node);
             return;
         }
@@ -226,8 +193,8 @@ internal static unsafe class RemotePanel
         switch (id)
         {
             case IdConnect: RunBusy(Connect); break;
-            case IdRefresh when SelectedNode() is { } node: Post(WM_REFRESH, node); break;
-            case IdDisconnect: DropConnection(); break;
+            case IdRefresh when _tree?.Selected is { } node: Post(WM_REFRESH, node); break;
+            case IdDisconnect: Disconnect(); break;
             case IdHidden: RunBusy(ToggleHidden); break;
         }
     }
@@ -240,7 +207,7 @@ internal static unsafe class RemotePanel
             SetVisible(false);
             return 0;
         }
-        if (header->idFrom != IdTree)
+        if (header->idFrom != IdTree || _tree is null)
             return 0;
 
         switch (header->code)
@@ -250,7 +217,7 @@ internal static unsafe class RemotePanel
                 // Una carpeta sin cargar no se despliega aquí: se carga fuera de la notificación
                 // y luego se despliega con TVM_EXPAND.
                 var info = (NMTREEVIEWW*)header;
-                if ((info->action & TVE_EXPAND) == 0 || !Nodes.TryGetValue(info->itemNew.lParam, out var node) || node.Loaded)
+                if ((info->action & TVE_EXPAND) == 0 || _tree.FromId(info->itemNew.lParam) is not { Loaded: false } node)
                     return 0;
                 if (!Busy)
                     Post(WM_EXPAND_NODE, node);
@@ -258,23 +225,19 @@ internal static unsafe class RemotePanel
             }
             case NM_DBLCLK:
                 // Para carpetas, el doble clic ya despliega el nodo.
-                if (!Busy && SelectedNode() is { IsDirectory: false } file)
+                if (!Busy && _tree.Selected is { IsDirectory: false } file)
                     Post(WM_OPEN_NODE, file);
                 return 0;
             case TVN_KEYDOWN:
                 ushort key = *(ushort*)((byte*)header + sizeof(NMHDR));
-                if (key == VK_F5 && !Busy && SelectedNode() is { } selected)
+                if (key == VK_F5 && !Busy && _tree.Selected is { } selected)
                     Post(WM_REFRESH, selected);
                 return 0;
         }
         return 0;
     }
 
-    private static void Post(uint msg, Node node)
-    {
-        nint id = Nodes.First(kv => kv.Value == node).Key;
-        PostMessage(_hwnd, msg, (nuint)id, 0);
-    }
+    private static void Post(uint msg, RemoteNode node) => PostMessage(_hwnd, msg, (nuint)node.Id, 0);
 
     private static void RunBusy(Action action)
     {
@@ -294,213 +257,126 @@ internal static unsafe class RemotePanel
     private static void Connect()
     {
         var (last, remember, profile) = Config.LoadLast();
-        var request = Plugin.WithKnownSecrets(_request ?? last);
         var options = new ConnectOptions { Remember = remember, Profile = profile };
+        if (Connector.ConnectWithDialog("Conectar el panel remoto (SSH/SFTP)", Connection.Request ?? last, options) is not { } connection)
+            return;
 
-        while (true)
-        {
-            var r = ConnectDialog.Show(Npp.Handle, "Conectar el panel remoto (SSH/SFTP)", "Conectar", request, options);
-            if (r is null)
-                return;
-            request = r;
-            SftpClient? client = null;
-            try
-            {
-                client = Plugin.ConnectInteractive(request);
-                if (client is null)
-                    continue;
-                Plugin.RememberSecrets(request);
-
-                string start = Sftp.ResolvePath(client, request.RemotePath);
-                if (IsFileQuiet(client, start))
-                    start = Sftp.Parent(start);
-                Config.SaveLast(request with { RemotePath = start }, options.Remember, options.Profile);
-
-                DropConnection();
-                _client = client;
-                _request = request;
-                client = null; // ya es del panel
-                SetText(IdStatus, $"{request.User}@{request.Host}");
-                UpdateButtons();
-                Rebuild(start);
-                SetFocus(_tree);
-                return;
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                Plugin.ForgetSecretsOnAuthError(request, ex);
-                Plugin.ShowError("No se pudo conectar con " + request.Display, ex);
-            }
-            finally
-            {
-                client?.Dispose();
-            }
-        }
-    }
-
-    private static bool IsFileQuiet(SftpClient client, string path)
-    {
+        var (client, request) = connection;
+        string start;
         try
         {
-            return Plugin.IsFile(client, path);
+            start = Connector.StartFolder(client, request.RemotePath, out _);
         }
-        catch (SftpPermissionDeniedException)
+        catch
         {
-            return false;
-        }
-    }
-
-    /// <summary>Cierra la conexión y vacía el árbol. No se llama nunca desde una notificación del árbol.</summary>
-    private static void DropConnection()
-    {
-        _client?.Dispose();
-        _client = null;
-        ClearTree();
-        if (_hwnd != IntPtr.Zero)
-        {
-            SetText(IdStatus, "Sin conexión");
-            UpdateButtons();
-        }
-    }
-
-    /// <summary>
-    /// Ejecuta una operación con la conexión del panel; si se había caído (servidor reiniciado,
-    /// VPN, suspensión del equipo) reconecta una vez con las mismas credenciales y reintenta.
-    /// Si no se puede reconectar, desconecta el panel y relanza el error.
-    /// </summary>
-    private static T WithClient<T>(Func<SftpClient, T> action)
-    {
-        if (_client is null || _request is null)
-            throw new OperationCanceledException(); // se desconectó mientras tanto
-        if (_client.IsConnected)
-        {
-            try
-            {
-                return action(_client);
-            }
-            catch (Exception ex) when (IsConnectionLost(ex))
-            {
-            }
-        }
-
-        var request = _request;
-        _client?.Dispose();
-        _client = null;
-        try
-        {
-            var client = Plugin.ConnectInteractive(request) ?? throw new OperationCanceledException();
-            _client = client;
-            return action(client);
-        }
-        catch (Exception ex)
-        {
-            Plugin.ForgetSecretsOnAuthError(request, ex);
-            DropConnection();
+            client.Dispose();
             throw;
         }
+        Config.SaveLast(request with { RemotePath = start }, options.Remember, options.Profile);
+
+        Connection.Attach(client, request);
+        SetText(IdStatus, $"{request.User}@{request.Host}");
+        UpdateButtons();
+        Rebuild(start);
+        if (_tree != null)
+            SetFocus(_tree.Handle);
     }
 
-    private static bool IsConnectionLost(Exception ex) =>
-        ex is SshConnectionException or SshOperationTimeoutException or SocketException or ObjectDisposedException;
+    private static void Disconnect()
+    {
+        Connection.Close();
+        ShowDisconnected();
+    }
+
+    /// <summary>Vacía el árbol y deja el panel como "Sin conexión". Nunca desde una notificación del árbol.</summary>
+    private static void ShowDisconnected()
+    {
+        _tree?.Clear();
+        if (_hwnd == IntPtr.Zero)
+            return;
+        SetText(IdStatus, "Sin conexión");
+        UpdateButtons();
+    }
 
     // --- Árbol ---
 
     /// <summary>Vacía el árbol, crea la raíz "/" y despliega hasta <paramref name="path"/>.</summary>
     private static void Rebuild(string path)
     {
-        ClearTree();
-        var node = new Node("/", true);
-        Insert(TVI_ROOT, "/", node);
+        if (_tree is null)
+            return;
+        var node = _tree.Reset();
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         for (int i = 0; ; i++)
         {
             bool last = i == parts.Length;
             if (!node.Loaded && !Load(node, showError: last))
             {
-                if (last || _client is null)
+                if (last || !Connection.IsOpen)
                     break;
                 // Carpeta intermedia sin permiso de lectura (p. ej. /home con 711): se crea
                 // solo el siguiente nivel para poder llegar a la carpeta inicial.
-                Insert(node.Item, parts[i], new Node(Combine(node.Path, parts[i]), true));
-                node.Loaded = true;
+                _tree.ReplaceChildren(node, [new RemoteNode(RemoteNode.Combine(node.Path, parts[i]), true)]);
             }
-            SendMessage(_tree, TVM_EXPAND, TVE_EXPAND, node.Item);
+            _tree.Expand(node);
             if (last)
                 break;
-            var child = Children(node).FirstOrDefault(c => c.Path == Combine(node.Path, parts[i]));
-            if (child is null)
+            string next = RemoteNode.Combine(node.Path, parts[i]);
+            if (_tree.ChildrenOf(node).FirstOrDefault(c => c.Path == next) is not { IsDirectory: true } child)
                 break;
             node = child;
-            if (!node.IsDirectory)
-                break;
         }
-        if (_client is not null)
-        {
-            SendMessage(_tree, TVM_SELECTITEM, TVGN_CARET, node.Item);
-            SendMessage(_tree, TVM_ENSUREVISIBLE, 0, node.Item);
-        }
+        _tree.Select(node);
     }
 
-    private static void Expand(Node node)
+    private static void Expand(RemoteNode node)
     {
         if (node.Loaded || Load(node, showError: true))
-            SendMessage(_tree, TVM_EXPAND, TVE_EXPAND, node.Item);
+            _tree?.Expand(node);
     }
 
-    private static void Refresh(Node node)
+    private static void Refresh(RemoteNode node)
     {
-        if (!node.IsDirectory)
-        {
-            IntPtr parent = (IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_PARENT, node.Item);
-            if (NodeOf(parent) is not { } folder)
-                return;
+        if (!node.IsDirectory && _tree?.ParentOf(node) is { } folder)
             node = folder;
-        }
-        if (Load(node, showError: true))
-            SendMessage(_tree, TVM_EXPAND, TVE_EXPAND, node.Item);
+        if (node.IsDirectory && Load(node, showError: true))
+            _tree?.Expand(node);
     }
 
     /// <summary>Lista la carpeta del nodo (fuera del hilo de la interfaz) y sustituye sus hijos. False si falla.</summary>
-    private static bool Load(Node node, bool showError)
+    private static bool Load(RemoteNode node, bool showError)
     {
-        List<Node> children;
+        List<RemoteNode> children;
         bool showHidden = Config.GetFlag("hidden", true);
         try
         {
-            children = WithClient(client =>
+            children = Connection.Run((client, _) =>
                 ProgressDialog.Run(Npp.Handle, "Listando " + node.Path, _ => List(client, node.Path, showHidden)));
         }
         catch (OperationCanceledException)
         {
             // Si se canceló a medias, la conexión puede seguir ocupada en otro hilo: se cierra.
-            if (_client is not null)
-                DropConnection();
+            if (Connection.IsOpen)
+                Disconnect();
             return false;
         }
         catch (Exception ex)
         {
             if (showError)
-                Plugin.ShowError("No se puede listar " + node.Path, ex);
+                Prompts.Error("No se puede listar " + node.Path, ex);
             return false;
         }
-        if (!Nodes.ContainsValue(node)) // el árbol se rehízo mientras tanto
-            return false;
 
-        DeleteChildren(node.Item);
-        foreach (var child in children)
-            Insert(node.Item, child.Path[(child.Path.LastIndexOf('/') + 1)..], child);
-        node.Loaded = true;
-        SetHasChildren(node.Item, children.Count > 0);
+        if (_tree is null || !_tree.Contains(node)) // el árbol se vació mientras tanto
+            return false;
+        _tree.ReplaceChildren(node, children);
         return true;
     }
 
-    /// <summary>Contenido de una carpeta; se ejecuta en un hilo de trabajo.</summary>
-    private static List<Node> List(SftpClient client, string folder, bool showHidden)
+    /// <summary>Contenido de una carpeta, carpetas primero; se ejecuta en un hilo de trabajo.</summary>
+    private static List<RemoteNode> List(SftpClient client, string folder, bool showHidden)
     {
-        var result = new List<Node>();
+        var result = new List<RemoteNode>();
         foreach (var f in client.ListDirectory(folder))
         {
             if (f.Name is "." or ".." || (!showHidden && f.Name.StartsWith('.')))
@@ -519,35 +395,19 @@ internal static unsafe class RemotePanel
             }
             // Ruta construida con el nombre: SSH.NET da FullName con la carpeta ya resuelta
             // (realpath), y si una carpeta es un enlace no coincidiría con la ruta del árbol.
-            result.Add(new Node(Combine(folder, f.Name), isDirectory));
+            result.Add(new RemoteNode(RemoteNode.Combine(folder, f.Name), isDirectory));
         }
         return result
             .OrderBy(n => n.IsDirectory ? 0 : 1)
-            .ThenBy(n => n.Path, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    private static string Combine(string folder, string name) => folder == "/" ? "/" + name : folder + "/" + name;
-
-    private static void ToggleHidden()
+    private static void Open(RemoteNode node)
     {
-        bool show = SendMessage(GetDlgItem(_hwnd, IdHidden), BM_GETCHECK, 0, 0) == 1;
-        Config.SetFlag("hidden", show);
-        if (_client is not null)
-            Rebuild(SelectedNode()?.Path ?? "/");
-    }
-
-    private static void SyncHiddenCheckbox() =>
-        SendMessage(GetDlgItem(_hwnd, IdHidden), BM_SETCHECK, Config.GetFlag("hidden", true) ? 1u : 0u, 0);
-
-    private static void Open(Node node)
-    {
-        if (_request is null)
-            return;
-        var request = _request;
         try
         {
-            WithClient(client =>
+            Connection.Run((client, request) =>
             {
                 Plugin.OpenFile(client, request, node.Path);
                 return true;
@@ -558,102 +418,28 @@ internal static unsafe class RemotePanel
         }
         catch (Exception ex)
         {
-            Plugin.ShowError("No se pudo abrir " + node.Path, ex);
+            Prompts.Error("No se pudo abrir " + node.Path, ex);
         }
     }
 
-    // --- Utilidades del TreeView ---
-
-    private static void Insert(IntPtr parent, string text, Node node)
+    private static void ToggleHidden()
     {
-        nint id = _nextId++;
-        Nodes[id] = node;
-        fixed (char* p = text)
-        {
-            var insert = new TVINSERTSTRUCTW
-            {
-                hParent = parent,
-                hInsertAfter = TVI_LAST,
-                item = new TVITEMEXW
-                {
-                    mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN,
-                    pszText = p,
-                    cChildren = node.IsDirectory ? 1 : 0, // botón "+" hasta saber si tiene contenido
-                    lParam = id,
-                },
-            };
-            node.Item = (IntPtr)SendMessage(_tree, TVM_INSERTITEMW, 0, (nint)(&insert));
-        }
+        bool show = SendMessage(GetDlgItem(_hwnd, IdHidden), BM_GETCHECK, 0, 0) == 1;
+        Config.SetFlag("hidden", show);
+        if (Connection.IsOpen)
+            Rebuild(_tree?.Selected?.Path ?? "/");
     }
 
-    private static void SetHasChildren(IntPtr item, bool value)
-    {
-        var tv = new TVITEMEXW { mask = TVIF_CHILDREN, hItem = item, cChildren = value ? 1 : 0 };
-        SendMessage(_tree, TVM_SETITEMW, 0, (nint)(&tv));
-    }
+    // --- Controles ---
 
-    private static Node? NodeOf(IntPtr item)
-    {
-        if (item == IntPtr.Zero)
-            return null;
-        var tv = new TVITEMEXW { mask = TVIF_PARAM, hItem = item };
-        if (SendMessage(_tree, TVM_GETITEMW, 0, (nint)(&tv)) == 0)
-            return null;
-        return Nodes.GetValueOrDefault(tv.lParam);
-    }
-
-    private static Node? SelectedNode() =>
-        _tree == IntPtr.Zero ? null : NodeOf((IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_CARET, 0));
-
-    private static IEnumerable<Node> Children(Node parent)
-    {
-        var result = new List<Node>();
-        for (IntPtr child = (IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_CHILD, parent.Item);
-             child != IntPtr.Zero;
-             child = (IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_NEXT, child))
-        {
-            if (NodeOf(child) is { } node)
-                result.Add(node);
-        }
-        return result;
-    }
-
-    private static void DeleteChildren(IntPtr parent)
-    {
-        IntPtr child;
-        while ((child = (IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_CHILD, parent)) != IntPtr.Zero)
-        {
-            ForgetSubtree(child);
-            SendMessage(_tree, TVM_DELETEITEM, 0, child);
-        }
-    }
-
-    /// <summary>Quita del diccionario los nodos de un elemento y sus descendientes.</summary>
-    private static void ForgetSubtree(IntPtr item)
-    {
-        for (IntPtr child = (IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_CHILD, item);
-             child != IntPtr.Zero;
-             child = (IntPtr)SendMessage(_tree, TVM_GETNEXTITEM, TVGN_NEXT, child))
-        {
-            ForgetSubtree(child);
-        }
-        var tv = new TVITEMEXW { mask = TVIF_PARAM, hItem = item };
-        if (SendMessage(_tree, TVM_GETITEMW, 0, (nint)(&tv)) != 0)
-            Nodes.Remove(tv.lParam);
-    }
-
-    private static void ClearTree()
-    {
-        if (_tree != IntPtr.Zero)
-            SendMessage(_tree, TVM_DELETEITEM, 0, TVI_ROOT);
-        Nodes.Clear();
-    }
+    private static void SyncHiddenCheckbox() =>
+        SendMessage(GetDlgItem(_hwnd, IdHidden), BM_SETCHECK, Config.GetFlag("hidden", true) ? 1u : 0u, 0);
 
     private static void UpdateButtons()
     {
-        bool connected = _client is not null;
-        EnableWindow(GetDlgItem(_hwnd, IdRefresh), connected ? 1 : 0);
-        EnableWindow(GetDlgItem(_hwnd, IdDisconnect), connected ? 1 : 0);
+        int enabled = Connection.IsOpen ? 1 : 0;
+        EnableWindow(GetDlgItem(_hwnd, IdRefresh), enabled);
+        EnableWindow(GetDlgItem(_hwnd, IdDisconnect), enabled);
     }
 
     private static void SetText(int id, string text)
