@@ -6,7 +6,7 @@ namespace SshOpen;
 
 /// <summary>
 /// Explorador modal de una carpeta remota: lista sus carpetas y ficheros, permite entrar en
-/// carpetas (doble clic / Intro, Retroceso para subir), ordenar por columna, filtrar por nombre
+/// carpetas (doble clic / Intro, Retroceso o ".." para subir, "/" para ir a la raíz), ordenar por columna, filtrar por nombre
 /// y ocultar los ficheros que empiezan por punto. Devuelve el fichero elegido.
 /// </summary>
 internal sealed unsafe class BrowseDialog : ModalDialog
@@ -21,7 +21,7 @@ internal sealed unsafe class BrowseDialog : ModalDialog
     private readonly SftpClient _client;
     private HWND _list;
     private string _current;
-    private List<Entry> _all = [];      // contenido de la carpeta, sin ".."
+    private List<Entry> _all = [];      // contenido de la carpeta, sin ".." ni "/"
     private List<Entry> _entries = [];  // lo que se ve en la lista, en orden
     private int _sortColumn;
     private bool _sortDescending;
@@ -231,31 +231,38 @@ internal sealed unsafe class BrowseDialog : ModalDialog
             .ToList();
         visible.Sort(Compare);
         if (_current != "/")
+        {
+            // Atajos de navegación: ".." sube un nivel y "/" va directamente a la raíz.
+            visible.Insert(0, new Entry("/", "/", true, false, 0, default));
             visible.Insert(0, new Entry("..", Sftp.Parent(_current), true, false, 0, default));
+        }
         _entries = visible;
 
         SendMessage(_list, LVM_DELETEALLITEMS, 0, 0);
         for (int n = 0; n < visible.Count; n++)
         {
             var e = visible[n];
-            if (e.Name == "..")
-                AddRow(n, "..", Tr.Up, "", "");
+            if (IsShortcut(e))
+                AddRow(n, e.Name, e.Name == "/" ? Tr.Root : Tr.Up, "", "");
             else
                 AddRow(n, e.Name, e.Type, e.IsDirectory ? "" : Tr.FormatSize(e.Size), e.Modified.ToString("yyyy-MM-dd HH:mm"));
         }
 
         int index = selected != null ? visible.FindIndex(e => e.Name == selected) : -1;
         if (index < 0 && filter != null)
-            index = visible.FindIndex(e => e.Name != ".."); // con filtro, el primer resultado real
+            index = visible.FindIndex(e => !IsShortcut(e)); // con filtro, el primer resultado real
         if (index < 0 && visible.Count > 0)
             index = 0;
         if (index >= 0)
             Select(index);
 
-        int folders = visible.Count(e => e.IsDirectory && e.Name != "..");
+        int folders = visible.Count(e => e.IsDirectory && !IsShortcut(e));
         int files = visible.Count(e => !e.IsDirectory);
         SetText(IdStatus, Tr.BrowseStatus(folders, files, _all.Count - folders - files));
     }
+
+    /// <summary>Filas ".." y "/" que añade la lista (ningún fichero real puede llamarse "/").</summary>
+    private static bool IsShortcut(Entry e) => e.Name is ".." or "/";
 
     /// <summary>Texto con * o ? = comodines; si no, "contiene". Sin distinguir mayúsculas.</summary>
     internal static Func<string, bool>? BuildFilter(string text)

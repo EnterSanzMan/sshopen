@@ -73,6 +73,8 @@ internal static class Tr
     public static string StartFolderLabel => L("Start folder:", "Carpeta inicial:");
     public static string StartFolderHint => L("Optional: /var/log  (empty = home folder)", "Opcional: /var/log  (vacío = carpeta del usuario)");
     public static string RemoteFileLabel => L("Remote file:", "Fichero remoto:");
+    public static string SudoOption =>
+        L("Use sudo to read and write files", "Usar sudo para leer y escribir");
     public static string RememberConnection =>
         L("Remember the last connection (secrets are never saved)", "Recordar la última conexión (las claves nunca se guardan)");
     public static string ChooseKeyTitle => L("Choose the private key", "Elige la clave privada");
@@ -105,6 +107,7 @@ internal static class Tr
     public static string ShowHidden => L("Show hidden (.*)", "Mostrar ocultos (.*)");
     public static string Open => L("Open", "Abrir");
     public static string Up => L("Up", "Subir");
+    public static string Root => L("Root", "Raíz");
     public static string SelectAFile => L("Select a file from the list.", "Selecciona un fichero de la lista.");
     public static string FolderNotAccessible(string folder) =>
         L($"Cannot access {folder}; showing the home folder.", $"No se puede acceder a {folder}; se muestra la carpeta del usuario.");

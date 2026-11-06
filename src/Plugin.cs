@@ -60,13 +60,15 @@ internal static class Plugin
     /// </summary>
     public static void OpenFile(SftpClient client, ConnectionRequest request, string remotePath)
     {
-        var target = request with { RemotePath = remotePath, Sudo = false };
+        // Con la casilla "sudo" marcada se usa desde el principio; si no, solo si SFTP no tiene permiso.
+        var target = request with { RemotePath = remotePath };
         string localPath = LocalCopies.PathFor(target);
         long stamp = 0;
         if (Config.TryGetLink(localPath, out var link))
         {
             stamp = link.RemoteStamp;
-            target = target with { Sudo = link.Target.Sudo }; // si ya hizo falta sudo, directamente con sudo
+            if (link.Target.Sudo)
+                target = target with { Sudo = true }; // si ya hizo falta sudo, directamente con sudo
         }
 
         if (!LocalCopies.HasUnsyncedChanges(localPath, Sftp.GetStamp(client, remotePath)) || Prompts.OverwriteLocalCopy(remotePath))
@@ -156,7 +158,7 @@ internal static class Plugin
                     GiveUpUpload(localPath, Tr.UploadCancelled);
                     return;
                 }
-                request = r with { Sudo = request.Sudo };
+                request = r; // con la casilla "sudo" tal como la haya dejado
                 ask = false;
             }
 
