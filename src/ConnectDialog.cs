@@ -18,6 +18,7 @@ internal sealed unsafe class ConnectDialog : ModalDialog
 {
     private const int IdProfile = 100, IdHost = 101, IdPort = 102, IdUser = 103, IdPass = 104, IdPath = 105;
     private const int IdRemember = 106, IdSaveProfile = 107, IdDeleteProfile = 108, IdKey = 109, IdBrowseKey = 110, IdPassphrase = 111;
+    private const int IdSudo = 112;
 
     private readonly ConnectOptions? _options;
     private List<Profile> _profiles = [];
@@ -40,7 +41,7 @@ internal sealed unsafe class ConnectDialog : ModalDialog
     private void Build(HWND owner, string title, string okText, ConnectionRequest defaults)
     {
         bool full = _options != null;
-        CreateFrame(owner, "SshOpenConnectDialog", title, 420, full ? 358 : 290);
+        CreateFrame(owner, "SshOpenConnectDialog", title, 420, full ? 388 : 320);
         try
         {
             int row = 14;
@@ -75,6 +76,12 @@ internal sealed unsafe class ConnectDialog : ModalDialog
             Row(Tr.PassphraseLabel, IdPassphrase, defaults.Passphrase, ES_PASSWORD, Tr.PassphraseHint);
             Row(full ? Tr.StartFolderLabel : Tr.RemoteFileLabel, IdPath, defaults.RemotePath, 0,
                 full ? Tr.StartFolderHint : "/etc/hosts");
+
+            // Marcada, los ficheros se leen y escriben con sudo desde el principio, sin esperar a
+            // que SFTP dé "permiso denegado" ni preguntar.
+            Child(0, "BUTTON", Tr.SudoOption, WS_TABSTOP | BS_AUTOCHECKBOX, 120, row, 286, 22, IdSudo);
+            SetChecked(IdSudo, defaults.Sudo);
+            row += 30;
 
             if (full)
             {
@@ -177,6 +184,7 @@ internal sealed unsafe class ConnectDialog : ModalDialog
         SetText(IdUser, profile.User);
         SetText(IdKey, profile.KeyFile);
         SetText(IdPath, profile.RemotePath);
+        SetChecked(IdSudo, profile.Sudo);
         FocusFirstEmpty();
     }
 
@@ -192,7 +200,7 @@ internal sealed unsafe class ConnectDialog : ModalDialog
         if (fields == null)
             return;
         _profiles.RemoveAll(p => string.Equals(p.Name, name, StringComparison.CurrentCultureIgnoreCase));
-        _profiles.Add(new Profile(name, fields.Host, fields.Port, fields.User, fields.RemotePath, fields.KeyFile));
+        _profiles.Add(new Profile(name, fields.Host, fields.Port, fields.User, fields.RemotePath, fields.KeyFile, fields.Sudo));
         Config.SaveProfiles(_profiles);
         FillProfiles(name);
         FocusFirstEmpty();
@@ -263,6 +271,7 @@ internal sealed unsafe class ConnectDialog : ModalDialog
         {
             KeyFile = key,
             Passphrase = key.Length > 0 ? Text(IdPassphrase) : "",
+            Sudo = IsChecked(IdSudo),
         };
     }
 

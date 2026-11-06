@@ -28,11 +28,12 @@ Los atajos se cambian en *Configuración → Administrador de atajos*.
 | Clave privada  | opcional: `C:\Users\yo\.ssh\id_ed25519` o un `.ppk` |
 | Frase de la clave | solo si la clave está protegida |
 | Carpeta inicial | opcional: `/var/log`; vacío = carpeta del usuario |
+| Usar sudo      | opcional: leer y escribir los ficheros con `sudo` desde el principio |
 
 1. Al conectar se abre un explorador con las carpetas y ficheros (nombre, tipo, tamaño, fecha)
    para navegar hasta el fichero:
-   - Doble clic o Intro entra en una carpeta o abre el fichero; Retroceso sube de carpeta;
-     también puedes escribir una ruta y pulsar *Ir*.
+   - Doble clic o Intro entra en una carpeta o abre el fichero; Retroceso o `..` sube de carpeta
+     y `/` vuelve directamente a la raíz; también puedes escribir una ruta y pulsar *Ir*.
    - Pulsa la cabecera de una columna para ordenar por ella (otra vez, al revés). Las carpetas
      van siempre primero.
    - *Filtro* muestra solo lo que contiene ese texto, o lo que encaja con comodines (`*.conf`).
@@ -70,7 +71,7 @@ Si además escribes la contraseña, se usa como segundo método (o para sudo).
 ### Perfiles
 
 Escribe un nombre en *Perfil* y pulsa **Guardar** para recordar servidor, puerto, usuario,
-carpeta inicial y ruta de la clave privada (la contraseña y la frase nunca se guardan). Al elegir
+carpeta inicial, ruta de la clave privada y la casilla de sudo (la contraseña y la frase nunca se guardan). Al elegir
 un perfil se rellenan los campos. **Borrar** elimina el perfil seleccionado.
 
 ### Ficheros de root (sudo)
@@ -81,6 +82,11 @@ que sobrescribe en el sitio y conserva propietario y permisos. Requiere que el u
 `sudoers` y que no tenga `requiretty`. Si entras con clave privada y sudo pide contraseña, escríbela
 también en *Contraseña*. Una vez aceptado, no vuelve a preguntar para esa cuenta mientras
 Notepad++ siga abierto. La barra de estado indica `(sudo)`.
+
+Si ya sabes que vas a necesitarlo, marca **Usar sudo para leer y escribir** al conectar (o al
+pedir las credenciales para subir): los ficheros se leen y guardan con sudo directamente, sin
+esperar al «permiso denegado» ni preguntar. El explorador sigue listando las carpetas con tu
+usuario.
 
 ### Idioma
 
@@ -177,9 +183,12 @@ Para que aparezca en *Plugins → Administrador de plugins*:
   cuenta los bytes y corta la transferencia al cancelar.
 - Con cada fichero se guarda la fecha de modificación remota de la última sincronización; antes de
   subir se vuelve a consultar y, si no coincide, se avisa (`RemoteChangedException`).
-- El acceso con sudo abre un canal de comandos SSH aparte (`src/Sudo.cs`): valida las credenciales
-  con `sudo -S -v` y después ejecuta `sudo -n cat | base64` y `sudo -n tee` con el contenido por
-  la entrada estándar, de modo que la contraseña nunca se mezcla con el fichero ni aparece en `ps`.
+- El acceso con sudo abre un canal de comandos SSH aparte (`src/Sudo.cs`). sudo recuerda la
+  contraseña por terminal (o por proceso padre) y cada comando SSH es un proceso nuevo, así que no
+  sirve validarla una vez: con NOPASSWD se usa `sudo -n`; si no, cada orden (`stat`, `cat | base64`,
+  `tee`) va con `sudo -k -S` y la contraseña en la primera línea de la entrada estándar, seguida
+  del contenido. `-k` obliga a sudo a leerla siempre, así nunca acaba dentro del fichero, y no
+  aparece en `ps`.
 
 ## Licencia
 
