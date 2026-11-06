@@ -3,16 +3,13 @@ namespace SshOpen;
 /// <summary>Copia local enlazada a un fichero remoto y fecha remota (segundos Unix, 0 = desconocida) de la última sincronización.</summary>
 internal sealed record FileLink(ConnectionRequest Target, long RemoteStamp);
 
-/// <summary>Conexión guardada con nombre (nunca incluye la clave).</summary>
-internal sealed record Profile(string Name, string Host, int Port, string User, string RemotePath)
-{
-    public ConnectionRequest ToRequest() => new(Host, Port, User, "", RemotePath);
-}
+/// <summary>Conexión guardada con nombre (nunca incluye la contraseña ni la frase de la clave).</summary>
+internal sealed record Profile(string Name, string Host, int Port, string User, string RemotePath, string KeyFile);
 
 /// <summary>
 /// Ficheros del plugin en la carpeta de configuración de plugins de Notepad++:
-///   SshOpen.ini          última conexión (sin clave) y último perfil usado
-///   SshOpen.profiles     perfiles de servidor, "nombre TAB host TAB puerto TAB usuario TAB carpeta"
+///   SshOpen.ini          última conexión (sin secretos), último perfil y opciones (ocultos, panel)
+///   SshOpen.profiles     perfiles, "nombre TAB host TAB puerto TAB usuario TAB carpeta TAB clave privada"
 ///   SshOpen.known_hosts  huellas aceptadas, "host:puerto SHA256:..."
 ///   SshOpen.files        copia local -> fichero remoto, para subir al guardar
 /// </summary>
@@ -34,15 +31,38 @@ internal static class Config
         var ini = ReadPairs(IniPath, '=');
         string Get(string key) => ini.GetValueOrDefault(key, "");
         int port = int.TryParse(Get("port"), out int p) ? p : 22;
-        return (new ConnectionRequest(Get("host"), port, Get("user"), "", Get("path")), Get("remember") != "0", Get("profile"));
+        var request = new ConnectionRequest(Get("host"), port, Get("user"), "", Get("path")) { KeyFile = Get("key") };
+        return (request, Get("remember") != "0", Get("profile"));
     }
 
     public static void SaveLast(ConnectionRequest r, bool remember, string profile)
     {
-        var lines = remember
-            ? new[] { "remember=1", $"profile={profile}", $"host={r.Host}", $"port={r.Port}", $"user={r.User}", $"path={r.RemotePath}" }
-            : new[] { "remember=0" };
-        Write(IniPath, lines);
+        var ini = ReadPairs(IniPath, '=');
+        foreach (var key in new[] { "profile", "host", "port", "user", "path", "key" })
+            ini.Remove(key);
+        ini["remember"] = remember ? "1" : "0";
+        if (remember)
+        {
+            ini["profile"] = profile;
+            ini["host"] = r.Host;
+            ini["port"] = r.Port.ToString();
+            ini["user"] = r.User;
+            ini["path"] = r.RemotePath;
+            ini["key"] = r.KeyFile;
+        }
+        Write(IniPath, ini.Select(kv => $"{kv.Key}={kv.Value}"));
+    }
+
+    // --- Opciones sueltas del .ini ---
+
+    public static bool GetFlag(string key, bool defaultValue) =>
+        ReadPairs(IniPath, '=').TryGetValue(key, out var v) ? v == "1" : defaultValue;
+
+    public static void SetFlag(string key, bool value)
+    {
+        var ini = ReadPairs(IniPath, '=');
+        ini[key] = value ? "1" : "0";
+        Write(IniPath, ini.Select(kv => $"{kv.Key}={kv.Value}"));
     }
 
     // --- Perfiles ---
@@ -54,9 +74,10 @@ internal static class Config
             return profiles;
         foreach (var line in File.ReadAllLines(ProfilesPath))
         {
+            // Formato anterior: 5 columnas (sin clave privada).
             var f = line.Split('\t');
-            if (f.Length == 5 && f[0].Length > 0 && int.TryParse(f[2], out int port))
-                profiles.Add(new Profile(f[0], f[1], port, f[3], f[4]));
+            if (f.Length is 5 or 6 && f[0].Length > 0 && int.TryParse(f[2], out int port))
+                profiles.Add(new Profile(f[0], f[1], port, f[3], f[4], f.Length == 6 ? f[5] : ""));
         }
         return profiles;
     }
@@ -64,7 +85,7 @@ internal static class Config
     public static void SaveProfiles(IEnumerable<Profile> profiles) =>
         Write(ProfilesPath, profiles
             .OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase)
-            .Select(p => string.Join('\t', p.Name, p.Host, p.Port, p.User, p.RemotePath)));
+            .Select(p => string.Join('\t', p.Name, p.Host, p.Port, p.User, p.RemotePath, p.KeyFile)));
 
     // --- Huellas de servidores ---
 
@@ -89,7 +110,7 @@ internal static class Config
         Write(FilesPath, Files.Where(kv => File.Exists(kv.Key)).Select(kv =>
         {
             var t = kv.Value.Target;
-            return string.Join('\t', kv.Key, t.Host, t.Port, t.User, t.RemotePath, t.Sudo ? 1 : 0, kv.Value.RemoteStamp);
+            return string.Join('\t', kv.Key, t.Host, t.Port, t.User, t.RemotePath, t.Sudo ? 1 : 0, kv.Value.RemoteStamp, t.KeyFile);
         }));
     }
 
@@ -102,12 +123,16 @@ internal static class Config
             return map;
         foreach (var line in File.ReadAllLines(FilesPath))
         {
-            // Formatos anteriores: 5 columnas (sin sudo) y 6 (sin fecha remota).
+            // Formatos anteriores: 5 columnas (sin sudo), 6 (sin fecha remota) y 7 (sin clave privada).
             var f = line.Split('\t');
-            if (f.Length is < 5 or > 7 || !int.TryParse(f[2], out int port))
+            if (f.Length is < 5 or > 8 || !int.TryParse(f[2], out int port))
                 continue;
-            var target = new ConnectionRequest(f[1], port, f[3], "", f[4]) { Sudo = f.Length >= 6 && f[5] == "1" };
-            long stamp = f.Length == 7 && long.TryParse(f[6], out long s) ? s : 0;
+            var target = new ConnectionRequest(f[1], port, f[3], "", f[4])
+            {
+                Sudo = f.Length >= 6 && f[5] == "1",
+                KeyFile = f.Length == 8 ? f[7] : "",
+            };
+            long stamp = f.Length >= 7 && long.TryParse(f[6], out long s) ? s : 0;
             map[f[0]] = new FileLink(target, stamp);
         }
         return map;

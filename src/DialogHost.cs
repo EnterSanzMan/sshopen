@@ -99,10 +99,12 @@ internal static unsafe class DialogHost
     }
 
     /// <summary>Bucle de mensajes modal: deshabilita Notepad++ hasta que <paramref name="isDone"/> sea true.</summary>
-    public static void RunModal(IntPtr owner, IntPtr hwnd, Func<bool> isDone)
+    /// <param name="show">false: el diálogo se encarga de mostrarse él mismo (o no) más tarde.</param>
+    public static void RunModal(IntPtr owner, IntPtr hwnd, Func<bool> isDone, bool show = true)
     {
         EnableWindow(owner, 0);
-        ShowWindow(hwnd, SW_SHOW);
+        if (show && IsWindowVisible(hwnd) == 0)
+            Show(hwnd);
 
         MSG msg;
         while (!isDone())
@@ -126,6 +128,13 @@ internal static unsafe class DialogHost
         DeleteObject(Font);
         Font = IntPtr.Zero;
         IsOpen = false;
+    }
+
+    /// <summary>Muestra el diálogo con el modo oscuro de Notepad++ aplicado (debe tener ya sus controles).</summary>
+    public static void Show(IntPtr hwnd)
+    {
+        Npp.ApplyDarkMode(hwnd);
+        ShowWindow(hwnd, SW_SHOW);
     }
 
     public static string Text(IntPtr parent, int id)

@@ -12,15 +12,18 @@ internal sealed class ConnectOptions
 }
 
 /// <summary>
-/// Diálogo modal para pedir servidor, puerto, usuario, clave y ruta remota.
+/// Diálogo modal para pedir servidor, puerto, usuario, contraseña o clave privada y ruta remota.
 /// Con <see cref="ConnectOptions"/> muestra además los perfiles guardados y la ruta puede ser
 /// una carpeta; sin ellas (subida) pide obligatoriamente un fichero.
 /// </summary>
 internal static unsafe class ConnectDialog
 {
     private const int IdProfile = 100, IdHost = 101, IdPort = 102, IdUser = 103, IdPass = 104, IdPath = 105;
-    private const int IdRemember = 106, IdSaveProfile = 107, IdDeleteProfile = 108;
+    private const int IdRemember = 106, IdSaveProfile = 107, IdDeleteProfile = 108, IdKey = 109, IdBrowseKey = 110, IdPassphrase = 111;
     private const int DC_HASDEFID = 0x534B;
+
+    private const string KeyFilter =
+        "Claves privadas (id_*, *.ppk, *.pem, *.key)\0id_*;*.ppk;*.pem;*.key\0Todos los ficheros (*.*)\0*.*\0\0";
 
     private static bool _done;
     private static ConnectOptions? _options;
@@ -37,7 +40,7 @@ internal static unsafe class ConnectDialog
         _options = options;
         bool full = options != null;
 
-        _hwnd = CreateFrame(owner, "SshOpenConnectDialog", &WndProc, title, 420, full ? 294 : 232);
+        _hwnd = CreateFrame(owner, "SshOpenConnectDialog", &WndProc, title, 420, full ? 358 : 290);
 
         int row = 14;
         if (full)
@@ -52,11 +55,11 @@ internal static unsafe class ConnectDialog
             FillProfiles(options!.Profile);
         }
 
-        void Row(string label, int id, string value, uint extraStyle, string? hint = null)
+        void Row(string label, int id, string value, uint extraStyle, string? hint = null, int width = 286)
         {
             Child(_hwnd, 0, "STATIC", label, 0, 14, row + 4, 104, 20, 0);
             IntPtr edit = Child(_hwnd, WS_EX_CLIENTEDGE, "EDIT", value, WS_TABSTOP | ES_AUTOHSCROLL | extraStyle,
-                120, row, 286, 24, id);
+                120, row, width, 24, id);
             if (hint != null)
                 SendMessage(edit, EM_SETCUEBANNER, 1, hint);
             row += 32;
@@ -65,13 +68,16 @@ internal static unsafe class ConnectDialog
         Row("Servidor (IP):", IdHost, defaults.Host, 0, "192.168.1.10");
         Row("Puerto:", IdPort, defaults.Port.ToString(), ES_NUMBER);
         Row("Usuario:", IdUser, defaults.User, 0, "root");
-        Row("Clave:", IdPass, defaults.Password, ES_PASSWORD);
+        Row("Contraseña:", IdPass, defaults.Password, ES_PASSWORD, "Opcional si usas clave privada");
+        Row("Clave privada:", IdKey, defaults.KeyFile, 0, "Opcional: fichero id_ed25519, .ppk...", width: 250);
+        Child(_hwnd, 0, "BUTTON", "...", WS_TABSTOP | BS_PUSHBUTTON, 376, row - 32, 30, 24, IdBrowseKey);
+        Row("Frase de la clave:", IdPassphrase, defaults.Passphrase, ES_PASSWORD, "Solo si la clave está protegida");
         Row(full ? "Carpeta inicial:" : "Fichero remoto:", IdPath, defaults.RemotePath, 0,
             full ? "Opcional: /var/log  (vacío = carpeta del usuario)" : "/etc/hosts");
 
         if (full)
         {
-            IntPtr check = Child(_hwnd, 0, "BUTTON", "Recordar la última conexión (la clave nunca se guarda)",
+            IntPtr check = Child(_hwnd, 0, "BUTTON", "Recordar la última conexión (las claves nunca se guardan)",
                 WS_TABSTOP | BS_AUTOCHECKBOX, 120, row, 286, 22, IdRemember);
             SendMessage(check, BM_SETCHECK, options!.Remember ? 1u : 0u, 0);
             row += 30;
@@ -112,6 +118,7 @@ internal static unsafe class ConnectDialog
                         case IDCANCEL: _done = true; break;
                         case IdSaveProfile: SaveProfile(); break;
                         case IdDeleteProfile: DeleteProfile(); break;
+                        case IdBrowseKey: BrowseKey(); break;
                         case IdProfile when code == CBN_SELCHANGE: LoadProfile(SelectedProfileName()); break;
                     }
                     return 0;
@@ -123,6 +130,21 @@ internal static unsafe class ConnectDialog
             _done = true;
         }
         return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+
+    private static void BrowseKey()
+    {
+        string current = Text(_hwnd, IdKey).Trim();
+        string sshDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
+        string? initialDir = current.Length > 0 && Directory.Exists(Path.GetDirectoryName(current)) ? Path.GetDirectoryName(current)
+            : Directory.Exists(sshDir) ? sshDir : null;
+        string? path = PickFile(_hwnd, "Elige la clave privada", KeyFilter, initialDir);
+        if (path == null)
+            return;
+        if (path != current)
+            SetText(_hwnd, IdPassphrase, "");
+        SetText(_hwnd, IdKey, path);
+        SetFocus(GetDlgItem(_hwnd, Sftp.KeyNeedsPassphrase(path) ? IdPassphrase : IdPath));
     }
 
     // --- Perfiles ---
@@ -160,12 +182,15 @@ internal static unsafe class ConnectDialog
         var profile = FindProfile(name);
         if (profile == null)
             return;
-        // La clave es de la cuenta anterior: no se reutiliza en otra.
+        // Los secretos son de la cuenta o la clave anteriores: no se reutilizan en otras.
         if (Text(_hwnd, IdHost).Trim() != profile.Host || Text(_hwnd, IdUser).Trim() != profile.User)
             SetText(_hwnd, IdPass, "");
+        if (Text(_hwnd, IdKey).Trim() != profile.KeyFile)
+            SetText(_hwnd, IdPassphrase, "");
         SetText(_hwnd, IdHost, profile.Host);
         SetText(_hwnd, IdPort, profile.Port.ToString());
         SetText(_hwnd, IdUser, profile.User);
+        SetText(_hwnd, IdKey, profile.KeyFile);
         SetText(_hwnd, IdPath, profile.RemotePath);
         FocusFirstEmpty();
     }
@@ -182,10 +207,10 @@ internal static unsafe class ConnectDialog
         if (fields == null)
             return;
         _profiles.RemoveAll(p => string.Equals(p.Name, name, StringComparison.CurrentCultureIgnoreCase));
-        _profiles.Add(new Profile(name, fields.Host, fields.Port, fields.User, fields.RemotePath));
+        _profiles.Add(new Profile(name, fields.Host, fields.Port, fields.User, fields.RemotePath, fields.KeyFile));
         Config.SaveProfiles(_profiles);
         FillProfiles(name);
-        SetFocus(GetDlgItem(_hwnd, Text(_hwnd, IdPass).Length == 0 ? IdPass : IdProfile));
+        FocusFirstEmpty();
     }
 
     private static void DeleteProfile()
@@ -229,6 +254,7 @@ internal static unsafe class ConnectDialog
         string host = Text(_hwnd, IdHost).Trim();
         string user = Text(_hwnd, IdUser).Trim();
         string path = Text(_hwnd, IdPath).Trim();
+        string key = Text(_hwnd, IdKey).Trim().Trim('"');
         if (host.Length == 0 || user.Length == 0)
         {
             Warn("Rellena servidor y usuario.", host.Length == 0 ? IdHost : IdUser);
@@ -239,18 +265,29 @@ internal static unsafe class ConnectDialog
             Warn("El puerto debe ser un número entre 1 y 65535.", IdPort);
             return null;
         }
+        if (key.Length > 0 && !File.Exists(key))
+        {
+            Warn("No existe el fichero de clave privada:\n" + key, IdKey);
+            return null;
+        }
         if (requireFile && (path.Length == 0 || path.EndsWith('/') || path.EndsWith('\\')))
         {
             Warn("Indica la ruta completa de un fichero.", IdPath);
             return null;
         }
-        return new ConnectionRequest(host, port, user, Text(_hwnd, IdPass), path);
+        return new ConnectionRequest(host, port, user, Text(_hwnd, IdPass), path)
+        {
+            KeyFile = key,
+            Passphrase = key.Length > 0 ? Text(_hwnd, IdPassphrase) : "",
+        };
     }
 
     private static void FocusFirstEmpty()
     {
+        string key = Text(_hwnd, IdKey).Trim();
         int id = Text(_hwnd, IdHost).Length == 0 ? IdHost
             : Text(_hwnd, IdUser).Length == 0 ? IdUser
+            : key.Length > 0 ? (Text(_hwnd, IdPassphrase).Length == 0 && File.Exists(key) && Sftp.KeyNeedsPassphrase(key) ? IdPassphrase : IdPath)
             : Text(_hwnd, IdPass).Length == 0 ? IdPass
             : IdPath;
         SetFocus(GetDlgItem(_hwnd, id));

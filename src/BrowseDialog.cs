@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Renci.SshNet;
 using static SshOpen.DialogHost;
 using static SshOpen.Win32;
@@ -7,20 +8,29 @@ namespace SshOpen;
 
 /// <summary>
 /// Explorador modal de una carpeta remota: lista sus carpetas y ficheros, permite entrar en
-/// carpetas (doble clic / Intro, Retroceso para subir) y devuelve el fichero elegido.
+/// carpetas (doble clic / Intro, Retroceso para subir), ordenar por columna, filtrar por nombre
+/// y ocultar los ficheros que empiezan por punto. Devuelve el fichero elegido.
 /// </summary>
 internal static unsafe class BrowseDialog
 {
-    private const int IdDir = 201, IdGo = 202, IdList = 203, IdStatus = 204;
+    private const int IdDir = 201, IdGo = 202, IdList = 203, IdStatus = 204, IdFilter = 205, IdHidden = 206;
     private const int DC_HASDEFID = 0x534B;
+    private static readonly string[] Columns = ["Nombre", "Tipo", "Tamaño", "Modificado"];
 
-    private sealed record Entry(string Name, string FullName, bool IsDirectory, bool IsLink, long Size, DateTime Modified);
+    private sealed record Entry(string Name, string FullName, bool IsDirectory, bool IsLink, long Size, DateTime Modified)
+    {
+        public string Type => IsDirectory ? "Carpeta" : IsLink ? "Enlace" : "Fichero";
+    }
 
     private static bool _done;
     private static IntPtr _hwnd, _list;
     private static SftpClient _client = null!;
     private static string _current = "/";
-    private static List<Entry> _entries = [];
+    private static List<Entry> _all = [];      // contenido de la carpeta, sin ".."
+    private static List<Entry> _entries = [];  // lo que se ve en la lista, en orden
+    private static int _sortColumn;
+    private static bool _sortDescending;
+    private static bool _showHidden = true;
     private static string? _result;
 
     /// <summary>Devuelve la ruta absoluta del fichero elegido, o null si se cancela.</summary>
@@ -32,7 +42,9 @@ internal static unsafe class BrowseDialog
         _result = null;
         _client = client;
         _current = folder;
+        _all = [];
         _entries = [];
+        _showHidden = Config.GetFlag("hidden", true);
 
         _hwnd = CreateFrame(owner, "SshOpenBrowseDialog", &WndProc, title, 600, 432);
 
@@ -40,13 +52,20 @@ internal static unsafe class BrowseDialog
         Child(_hwnd, WS_EX_CLIENTEDGE, "EDIT", folder, WS_TABSTOP | ES_AUTOHSCROLL, 78, 14, 420, 24, IdDir);
         Child(_hwnd, 0, "BUTTON", "Ir", WS_TABSTOP | BS_PUSHBUTTON, 506, 13, 80, 26, IdGo);
 
+        Child(_hwnd, 0, "STATIC", "Filtro:", 0, 14, 50, 60, 20, 0);
+        IntPtr filter = Child(_hwnd, WS_EX_CLIENTEDGE, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL, 78, 46, 280, 24, IdFilter);
+        SendMessage(filter, EM_SETCUEBANNER, 1, "Parte del nombre, o comodines: *.conf");
+        IntPtr hidden = Child(_hwnd, 0, "BUTTON", "Mostrar ocultos (.*)", WS_TABSTOP | BS_AUTOCHECKBOX, 372, 48, 214, 20, IdHidden);
+        SendMessage(hidden, BM_SETCHECK, _showHidden ? 1u : 0u, 0);
+
         _list = Child(_hwnd, WS_EX_CLIENTEDGE, "SysListView32", "",
-            WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 14, 48, 572, 330, IdList);
+            WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 14, 80, 572, 298, IdList);
         SendMessage(_list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (nint)(LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER));
-        AddColumn(0, "Nombre", 260, 0);
-        AddColumn(1, "Tipo", 70, 0);
-        AddColumn(2, "Tamaño", 85, LVCFMT_RIGHT);
-        AddColumn(3, "Modificado", 125, 0);
+        AddColumn(0, 260, 0);
+        AddColumn(1, 70, 0);
+        AddColumn(2, 85, LVCFMT_RIGHT);
+        AddColumn(3, 125, 0);
+        UpdateColumnHeaders();
 
         Child(_hwnd, 0, "STATIC", "", 0, 14, 394, 370, 20, IdStatus);
         Child(_hwnd, 0, "BUTTON", "Abrir", WS_TABSTOP | BS_DEFPUSHBUTTON, 398, 388, 90, 28, IDOK);
@@ -54,7 +73,7 @@ internal static unsafe class BrowseDialog
 
         // Se muestra antes de listar para que los avisos de error cuelguen ya del diálogo.
         EnableWindow(owner, 0);
-        ShowWindow(_hwnd, SW_SHOW);
+        DialogHost.Show(_hwnd);
 
         if (Navigate(folder, showError: false))
         {
@@ -92,23 +111,32 @@ internal static unsafe class BrowseDialog
                     return 0;
                 case WM_COMMAND:
                     int id = (int)(wParam & 0xFFFF);
-                    if (id == IdGo || (id == IDOK && GetFocus() == GetDlgItem(_hwnd, IdDir)))
+                    int code = (int)(wParam >> 16);
+                    IntPtr focus = GetFocus();
+                    if (id == IdGo || (id == IDOK && focus == GetDlgItem(_hwnd, IdDir)))
                         GoTo(Text(_hwnd, IdDir).Trim());
                     else if (id == IDOK)
                         ActivateSelected();
                     else if (id == IDCANCEL)
                         _done = true;
+                    else if (id == IdFilter && code == EN_CHANGE)
+                        Render(keepSelection: false);
+                    else if (id == IdHidden && code == BN_CLICKED)
+                        ToggleHidden();
                     return 0;
                 case WM_NOTIFY:
                     var header = (NMHDR*)lParam;
                     if (header->idFrom != IdList)
                         break;
-                    // NMITEMACTIVATE.iItem y NMLVKEYDOWN.wVKey van justo detrás de la cabecera NMHDR.
+                    // NMITEMACTIVATE.iItem, NMLVKEYDOWN.wVKey y NMLISTVIEW.iItem van justo detrás de NMHDR;
+                    // NMLISTVIEW.iSubItem (la columna pulsada) va detrás de iItem.
                     byte* body = (byte*)lParam + sizeof(NMHDR);
                     if (header->code == NM_DBLCLK && *(int*)body >= 0)
                         ActivateSelected();
                     else if (header->code == LVN_KEYDOWN && *(ushort*)body == VK_BACK)
                         Navigate(Sftp.Parent(_current));
+                    else if (header->code == LVN_COLUMNCLICK)
+                        SortBy(*(int*)(body + sizeof(int)));
                     return 0;
             }
         }
@@ -143,8 +171,8 @@ internal static unsafe class BrowseDialog
 
     private static void ActivateSelected()
     {
-        int index = (int)SendMessage(_list, LVM_GETNEXTITEM, nuint.MaxValue, (nint)LVNI_SELECTED);
-        if (index < 0 || index >= _entries.Count)
+        int index = SelectedIndex();
+        if (index < 0)
         {
             MessageBox(_hwnd, "Selecciona un fichero de la lista.", Plugin.Name, MB_ICONINFORMATION);
             return;
@@ -179,16 +207,14 @@ internal static unsafe class BrowseDialog
 
     private static bool Navigate(string folder, bool showError = true)
     {
-        List<Entry> entries;
+        List<Entry> all;
         try
         {
             using (new WaitCursor())
             {
-                entries = _client.ListDirectory(folder)
+                all = _client.ListDirectory(folder)
                     .Where(f => f.Name is not "." and not "..")
                     .Select(f => new Entry(f.Name, f.FullName, f.IsDirectory, f.IsSymbolicLink, f.Length, f.LastWriteTime))
-                    .OrderByDescending(e => e.IsDirectory)
-                    .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
                     .ToList();
             }
         }
@@ -199,41 +225,129 @@ internal static unsafe class BrowseDialog
             return false;
         }
 
-        if (folder != "/")
-            entries.Insert(0, new Entry("..", Sftp.Parent(folder), true, false, 0, default));
-
         _current = folder;
-        _entries = entries;
+        _all = all;
         SetText(_hwnd, IdDir, folder);
-
-        SendMessage(_list, LVM_DELETEALLITEMS, 0, 0);
-        for (int i = 0; i < entries.Count; i++)
-        {
-            var e = entries[i];
-            if (e.Name == "..")
-            {
-                AddRow(i, "..", "Subir", "", "");
-                continue;
-            }
-            AddRow(i, e.Name,
-                e.IsDirectory ? "Carpeta" : e.IsLink ? "Enlace" : "Fichero",
-                e.IsDirectory ? "" : FormatSize(e.Size),
-                e.Modified.ToString("yyyy-MM-dd HH:mm"));
-        }
-        if (entries.Count > 0)
-            Select(0);
-
-        int folders = entries.Count(e => e.IsDirectory && e.Name != "..");
-        SetText(_hwnd, IdStatus, $"{folders} carpetas, {entries.Count(e => !e.IsDirectory)} ficheros   ·   Retroceso: subir de carpeta");
+        Render(keepSelection: false);
         return true;
     }
 
-    private static void AddColumn(int index, string title, int width, int format)
+    /// <summary>Vuelve a pintar la lista con el filtro, la opción de ocultos y el orden actuales (sin ir al servidor).</summary>
+    private static void Render(bool keepSelection)
     {
-        fixed (char* text = title)
+        string? selected = keepSelection && SelectedIndex() is int i and >= 0 ? _entries[i].Name : null;
+
+        var filter = BuildFilter(Text(_hwnd, IdFilter).Trim());
+        var visible = _all
+            .Where(e => _showHidden || !e.Name.StartsWith('.'))
+            .Where(e => filter == null || filter(e.Name))
+            .ToList();
+        visible.Sort(Compare);
+        if (_current != "/")
+            visible.Insert(0, new Entry("..", Sftp.Parent(_current), true, false, 0, default));
+        _entries = visible;
+
+        SendMessage(_list, LVM_DELETEALLITEMS, 0, 0);
+        for (int n = 0; n < visible.Count; n++)
+        {
+            var e = visible[n];
+            if (e.Name == "..")
+                AddRow(n, "..", "Subir", "", "");
+            else
+                AddRow(n, e.Name, e.Type, e.IsDirectory ? "" : FormatSize(e.Size), e.Modified.ToString("yyyy-MM-dd HH:mm"));
+        }
+
+        int index = selected != null ? visible.FindIndex(e => e.Name == selected) : -1;
+        if (index < 0 && filter != null)
+            index = visible.FindIndex(e => e.Name != ".."); // con filtro, el primer resultado real
+        if (index < 0 && visible.Count > 0)
+            index = 0;
+        if (index >= 0)
+            Select(index);
+
+        int folders = visible.Count(e => e.IsDirectory && e.Name != "..");
+        int files = visible.Count(e => !e.IsDirectory);
+        int hidden = _all.Count - folders - files;
+        SetText(_hwnd, IdStatus, $"{folders} carpetas, {files} ficheros" +
+            (hidden > 0 ? $" ({hidden} sin mostrar)" : "") + "   ·   Retroceso: subir");
+    }
+
+    /// <summary>Texto con * o ? = comodines; si no, "contiene". Sin distinguir mayúsculas.</summary>
+    private static Func<string, bool>? BuildFilter(string text)
+    {
+        if (text.Length == 0)
+            return null;
+        if (text.Contains('*') || text.Contains('?'))
+        {
+            var regex = new Regex("^" + Regex.Escape(text).Replace(@"\*", ".*").Replace(@"\?", ".") + "$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return regex.IsMatch;
+        }
+        return name => name.Contains(text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Carpetas siempre primero; dentro de cada grupo, la columna elegida y luego el nombre.</summary>
+    private static int Compare(Entry a, Entry b)
+    {
+        if (a.IsDirectory != b.IsDirectory)
+            return a.IsDirectory ? -1 : 1;
+        int result = _sortColumn switch
+        {
+            1 => string.Compare(a.Type, b.Type, StringComparison.OrdinalIgnoreCase),
+            2 => a.Size.CompareTo(b.Size),
+            3 => a.Modified.CompareTo(b.Modified),
+            _ => 0,
+        };
+        if (result == 0)
+            result = string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+        return _sortDescending ? -result : result;
+    }
+
+    private static void SortBy(int column)
+    {
+        if (column < 0 || column >= Columns.Length)
+            return;
+        if (column == _sortColumn)
+            _sortDescending = !_sortDescending;
+        else
+            (_sortColumn, _sortDescending) = (column, column == 3); // por fecha, lo más reciente primero
+        UpdateColumnHeaders();
+        Render(keepSelection: true);
+    }
+
+    private static void ToggleHidden()
+    {
+        _showHidden = SendMessage(GetDlgItem(_hwnd, IdHidden), BM_GETCHECK, 0, 0) == 1;
+        Config.SetFlag("hidden", _showHidden);
+        Render(keepSelection: true);
+    }
+
+    private static int SelectedIndex()
+    {
+        int index = (int)SendMessage(_list, LVM_GETNEXTITEM, nuint.MaxValue, (nint)LVNI_SELECTED);
+        return index >= 0 && index < _entries.Count ? index : -1;
+    }
+
+    private static void AddColumn(int index, int width, int format)
+    {
+        fixed (char* text = Columns[index])
         {
             var col = new LVCOLUMNW { mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT, fmt = format, cx = S(width), pszText = text };
             SendMessage(_list, LVM_INSERTCOLUMNW, (nuint)index, (nint)(&col));
+        }
+    }
+
+    /// <summary>Marca con ▲/▼ la columna por la que se ordena.</summary>
+    private static void UpdateColumnHeaders()
+    {
+        for (int i = 0; i < Columns.Length; i++)
+        {
+            string title = i == _sortColumn ? Columns[i] + (_sortDescending ? " ▼" : " ▲") : Columns[i];
+            fixed (char* text = title)
+            {
+                var col = new LVCOLUMNW { mask = LVCF_TEXT, pszText = text };
+                SendMessage(_list, LVM_SETCOLUMNW, (nuint)i, (nint)(&col));
+            }
         }
     }
 

@@ -22,6 +22,16 @@
     <!-- Runtime y compilador AOT parcheados, independientes del parche del SDK instalado
          (10.0.9 tiene la vulnerabilidad GHSA-p3jp-9v83-76w9). -->
     <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
+
+    <!-- La versión del recurso de la DLL debe coincidir con la de la lista oficial de plugins
+         (nppPluginList). El flujo de GitHub Actions comprueba que la etiqueta vX.Y.Z coincide. -->
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>SshOpen</Product>
+    <Company>D4vidSP</Company>
+    <Copyright>Copyright (c) 2026 D4vidSP</Copyright>
+    <Description>Plugin de Notepad++ para abrir y editar ficheros remotos por SSH/SFTP</Description>
   </PropertyGroup>
 
   <ItemGroup>

@@ -21,6 +21,21 @@ internal struct NotifyHeader
     public uint Code;
 }
 
+/// <summary>DockedWidgetData / tTbData de Docking.h.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct TbData
+{
+    public IntPtr hClient;
+    public IntPtr pszName;
+    public int dlgID;          // índice en funcItem del comando que muestra el panel
+    public uint uMask;         // DWS_DF_CONT_*, DWS_ICONTAB...
+    public IntPtr hIconTab;
+    public IntPtr pszAddInfo;
+    public RECT rcFloat;       // uso interno de Notepad++
+    public int iPrevCont;      // uso interno de Notepad++
+    public IntPtr pszModuleName; // nombre del fichero DLL, con ".dll"
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal struct ShortcutKey
 {
@@ -43,8 +58,12 @@ internal unsafe struct FuncItem
 /// <summary>Mensajes a la ventana principal de Notepad++.</summary>
 internal static unsafe class Npp
 {
+    public const uint DWS_DF_CONT_LEFT = 0 << 28;
+
     private const uint NPPMSG = 0x0400 + 1000;
     private const uint NPPM_GETNBOPENFILES = NPPMSG + 7;
+    private const uint NPPM_MODELESSDIALOG = NPPMSG + 12;
+    private const nuint MODELESSDIALOGADD = 0, MODELESSDIALOGREMOVE = 1;
     private const uint NPPM_SETSTATUSBAR = NPPMSG + 24;
     private const uint NPPM_RELOADFILE = NPPMSG + 36;
     private const uint NPPM_SAVECURRENTFILE = NPPMSG + 38;
@@ -52,15 +71,45 @@ internal static unsafe class Npp
     private const uint NPPM_GETFULLPATHFROMBUFFERID = NPPMSG + 58;
     private const uint NPPM_GETBUFFERIDFROMPOS = NPPMSG + 59;
     private const uint NPPM_GETCURRENTBUFFERID = NPPMSG + 60;
-    private const uint NPPM_DOFILEOPEN = NPPMSG + 77;
+    private const uint NPPM_DMMSHOW = NPPMSG + 30;
+    private const uint NPPM_DMMHIDE = NPPMSG + 31;
+    private const uint NPPM_DMMREGASDCKDLG = NPPMSG + 33;
+    private const uint NPPM_SETMENUITEMCHECK = NPPMSG + 40;
+    private const uint NPPM_DOOPEN = NPPMSG + 77;
+    private const uint NPPM_DARKMODESUBCLASSANDTHEME = NPPMSG + 112;
+    private const nuint DarkModeInit = 0x0000000B; // NppDarkMode::dmfInit
     private const nuint STATUSBAR_DOC_TYPE = 0;
 
     public const uint NPPN_READY = 1000 + 1;
     public const uint NPPN_FILESAVED = 1000 + 8;
+    public const uint NPPN_SHUTDOWN = 1000 + 9;
+
+    /// <summary>Notificación de cierre de un panel acoplado (dockingResource.h: DMN_FIRST + 1).</summary>
+    public const int DMN_CLOSE = 1050 + 1;
 
     public static IntPtr Handle;
 
-    public static void OpenFile(string path) => Win32.SendMessage(Handle, NPPM_DOFILEOPEN, 0, path);
+    public static void OpenFile(string path) => Win32.SendMessage(Handle, NPPM_DOOPEN, 0, path);
+
+    public static void SetMenuItemCheck(int cmdId, bool check) =>
+        Win32.SendMessage(Handle, NPPM_SETMENUITEMCHECK, (nuint)cmdId, check ? 1 : 0);
+
+    /// <summary>Registra una ventana como panel acoplable. <paramref name="data"/> y sus cadenas deben vivir siempre.</summary>
+    public static void RegisterDockingPanel(TbData* data) => Win32.SendMessage(Handle, NPPM_DMMREGASDCKDLG, 0, (nint)data);
+
+    public static void ShowDockingPanel(IntPtr hwnd) => Win32.SendMessage(Handle, NPPM_DMMSHOW, 0, hwnd);
+
+    public static void HideDockingPanel(IntPtr hwnd) => Win32.SendMessage(Handle, NPPM_DMMHIDE, 0, hwnd);
+
+    /// <summary>
+    /// Mete o saca una ventana de la lista de diálogos no modales: Notepad++ le pasa entonces los
+    /// mensajes por IsDialogMessage antes que por sus atajos (Tab, Intro y F5 llegan al panel).
+    /// </summary>
+    public static void RegisterModeless(IntPtr hwnd, bool add) =>
+        Win32.SendMessage(Handle, NPPM_MODELESSDIALOG, add ? MODELESSDIALOGADD : MODELESSDIALOGREMOVE, hwnd);
+
+    /// <summary>Aplica el modo oscuro de Notepad++ (si está activo) a un diálogo propio ya con sus controles.</summary>
+    public static void ApplyDarkMode(IntPtr hwnd) => Win32.SendMessage(Handle, NPPM_DARKMODESUBCLASSANDTHEME, DarkModeInit, hwnd);
 
     /// <summary>Recarga desde disco un fichero ya abierto, sin preguntar.</summary>
     public static void ReloadFile(string path) => Win32.SendMessage(Handle, NPPM_RELOADFILE, 0, path);

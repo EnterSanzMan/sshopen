@@ -8,6 +8,12 @@ internal sealed record ConnectionRequest(string Host, int Port, string User, str
     /// <summary>El fichero se lee y escribe con sudo (el usuario no tiene permiso directo).</summary>
     public bool Sudo { get; init; }
 
+    /// <summary>Fichero local de clave privada (OpenSSH, PEM o PuTTY .ppk); vacío = solo contraseña.</summary>
+    public string KeyFile { get; init; } = "";
+
+    /// <summary>Frase de la clave privada, si está protegida (solo en memoria, como la contraseña).</summary>
+    public string Passphrase { get; init; } = "";
+
     /// <summary>Identifica la cuenta en el servidor (para reutilizar la clave durante la sesión).</summary>
     public string Account => $"{User}@{Host}:{Port}";
 
@@ -16,7 +22,7 @@ internal sealed record ConnectionRequest(string Host, int Port, string User, str
     /// <summary>SFTP no expande "~": las rutas relativas ya parten del home del usuario.</summary>
     public string SftpPath => RemotePath is "" or "~" ? "." : RemotePath.StartsWith("~/") ? RemotePath[2..] : RemotePath;
 
-    public ConnectionRequest WithoutPassword() => this with { Password = "" };
+    public ConnectionRequest WithoutPassword() => this with { Password = "", Passphrase = "" };
 
     // El ToString generado por el record incluiría la clave.
     public override string ToString() => Display;
@@ -36,6 +42,13 @@ internal sealed class RemoteChangedException(long current) : Exception("El fiche
     /// <summary>Fecha de modificación actual en segundos Unix; 0 si ya no existe.</summary>
     public long Current => current;
 }
+
+/// <summary>No se pudo leer la clave privada (frase incorrecta, formato no admitido o fichero dañado).</summary>
+internal sealed class KeyLoadException(string path, bool withPassphrase, Exception inner) : Exception(
+    (withPassphrase
+        ? "No se pudo abrir la clave privada: la frase no es correcta o el formato no está admitido."
+        : "No se pudo leer la clave privada: el formato no está admitido o el fichero está dañado.")
+    + "\n" + path + "\n(" + inner.Message + ")", inner);
 
 /// <summary>Descarga y subida de ficheros por SFTP (subsistema SSH; el servidor no necesita scp).</summary>
 internal static class Sftp
@@ -193,16 +206,78 @@ internal static class Sftp
 
     private static ConnectionInfo CreateConnectionInfo(ConnectionRequest r)
     {
-        // Muchos servidores solo admiten "keyboard-interactive" para claves: se ofrecen ambos métodos.
-        var keyboard = new KeyboardInteractiveAuthenticationMethod(r.User);
-        keyboard.AuthenticationPrompt += (_, e) =>
+        var methods = new List<AuthenticationMethod>();
+        if (r.KeyFile.Length > 0)
+            methods.Add(new PrivateKeyAuthenticationMethod(r.User, LoadKey(r.KeyFile, r.Passphrase)));
+
+        // Con clave privada la contraseña es opcional (puede hacer falta para sudo o como segundo factor).
+        if (r.KeyFile.Length == 0 || r.Password.Length > 0)
         {
-            foreach (var prompt in e.Prompts)
-                prompt.Response = r.Password;
-        };
-        return new ConnectionInfo(r.Host, r.Port, r.User, new PasswordAuthenticationMethod(r.User, r.Password), keyboard)
+            // Muchos servidores solo admiten "keyboard-interactive" para claves: se ofrecen ambos métodos.
+            var keyboard = new KeyboardInteractiveAuthenticationMethod(r.User);
+            keyboard.AuthenticationPrompt += (_, e) =>
+            {
+                foreach (var prompt in e.Prompts)
+                    prompt.Response = r.Password;
+            };
+            methods.Add(new PasswordAuthenticationMethod(r.User, r.Password));
+            methods.Add(keyboard);
+        }
+
+        return new ConnectionInfo(r.Host, r.Port, r.User, methods.ToArray())
         {
             Timeout = TimeSpan.FromSeconds(15),
         };
+    }
+
+    // Claves ya descifradas, para no cargar (y dejar sin liberar) una por conexión. Se
+    // invalidan si cambia el fichero; la frase forma parte de la clave del diccionario.
+    private static readonly Dictionary<(string Path, string Passphrase, DateTime Modified), PrivateKeyFile> Keys = [];
+    private static readonly Lock KeysLock = new();
+
+    private static PrivateKeyFile LoadKey(string path, string passphrase)
+    {
+        if (!File.Exists(path))
+            throw new FileNotFoundException("No se encuentra el fichero de clave privada:\n" + path, path);
+        var id = (path, passphrase, File.GetLastWriteTimeUtc(path));
+        lock (KeysLock)
+        {
+            if (Keys.TryGetValue(id, out var cached))
+                return cached;
+            PrivateKeyFile key;
+            try
+            {
+                key = passphrase.Length > 0 ? new PrivateKeyFile(path, passphrase) : new PrivateKeyFile(path);
+            }
+            catch (SshPassPhraseNullOrEmptyException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Frase incorrecta o formato no admitido: SSH.NET da excepciones distintas según el formato.
+                throw new KeyLoadException(path, passphrase.Length > 0, ex);
+            }
+            Keys[id] = key;
+            return key;
+        }
+    }
+
+    /// <summary>La clave privada está cifrada y no se puede usar sin frase.</summary>
+    public static bool KeyNeedsPassphrase(string path)
+    {
+        try
+        {
+            using var _ = new PrivateKeyFile(path);
+            return false;
+        }
+        catch (SshPassPhraseNullOrEmptyException)
+        {
+            return true;
+        }
+        catch
+        {
+            return false; // otros errores (formato, fichero) se informan al conectar
+        }
     }
 }

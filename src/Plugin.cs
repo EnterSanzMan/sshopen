@@ -12,9 +12,11 @@ internal static class Plugin
 {
     public const string Name = "SshOpen";
 
-    // Claves introducidas en esta sesión de Notepad++, por cuenta (solo en memoria).
-    // Ordinal: los usuarios de Linux distinguen mayúsculas.
-    private static readonly Dictionary<string, string> Passwords = new(StringComparer.Ordinal);
+    /// <summary>Credenciales que funcionaron en esta sesión de Notepad++ (solo en memoria).</summary>
+    private sealed record Secret(string Password, string KeyFile, string Passphrase);
+
+    // Por cuenta. Ordinal: los usuarios de Linux distinguen mayúsculas.
+    private static readonly Dictionary<string, Secret> Secrets = new(StringComparer.Ordinal);
 
     // Copias locales cuya última subida falló o se canceló.
     private static readonly HashSet<string> PendingUpload = new(StringComparer.OrdinalIgnoreCase);
@@ -29,7 +31,7 @@ internal static class Plugin
     public static void OpenRemote()
     {
         var (last, remember, profile) = Config.LoadLast();
-        var request = WithKnownPassword(last);
+        var request = WithKnownSecrets(last);
         var options = new ConnectOptions { Remember = remember, Profile = profile };
 
         while (true)
@@ -44,7 +46,7 @@ internal static class Plugin
                 using var client = ConnectInteractive(request);
                 if (client is null)
                     continue;
-                Passwords[request.Account] = request.Password;
+                RememberSecrets(request);
 
                 // Siempre se navega con el explorador. Si la ruta es un fichero, se empieza en su
                 // carpeta con él seleccionado; si no existe, el explorador vuelve al home.
@@ -62,18 +64,7 @@ internal static class Plugin
                 if (path is null)
                     return;
 
-                var target = request with { RemotePath = path };
-                string localPath = LocalPathFor(target);
-                long stamp = Config.TryGetLink(localPath, out var link) ? link.RemoteStamp : 0;
-                if (!HasUnsyncedChanges(client, path, localPath) || ConfirmOverwriteLocal(path))
-                {
-                    (target, stamp) = Download(client, target, localPath);
-                    PendingUpload.Remove(localPath);
-                }
-
-                Config.MapFile(localPath, target, stamp);
-                Npp.OpenFile(localPath);
-                Npp.SetStatus($"SFTP: abierto {target.Display}{(target.Sudo ? " (sudo)" : "")}");
+                OpenFile(client, request, path);
                 return;
             }
             catch (OperationCanceledException)
@@ -82,18 +73,39 @@ internal static class Plugin
             }
             catch (Exception ex)
             {
-                if (ex is SshAuthenticationException)
-                    Passwords.Remove(request.Account);
+                ForgetSecretsOnAuthError(request, ex);
                 ShowError("No se pudo abrir " + request.Display, ex);
             }
         }
     }
 
     /// <summary>
+    /// Descarga el fichero remoto a su copia local (salvo que la copia tenga cambios sin subir y
+    /// el usuario prefiera conservarlos), la enlaza para subirla al guardar y la abre.
+    /// </summary>
+    internal static void OpenFile(SftpClient client, ConnectionRequest request, string remotePath)
+    {
+        var target = request with { RemotePath = remotePath, Sudo = false };
+        string localPath = LocalPathFor(target);
+        long stamp = Config.TryGetLink(localPath, out var link) ? link.RemoteStamp : 0;
+        if (link != null)
+            target = target with { Sudo = link.Target.Sudo };
+        if (!HasUnsyncedChanges(client, remotePath, localPath) || ConfirmOverwriteLocal(remotePath))
+        {
+            (target, stamp) = Download(client, target, localPath);
+            PendingUpload.Remove(localPath);
+        }
+
+        Config.MapFile(localPath, target, stamp);
+        Npp.OpenFile(localPath);
+        Npp.SetStatus($"SFTP: abierto {target.Display}{(target.Sudo ? " (sudo)" : "")}");
+    }
+
+    /// <summary>
     /// Conecta mostrando progreso; si la huella del servidor no está aceptada la enseña y, si el
     /// usuario la acepta, la guarda y reintenta. Devuelve null si la rechaza.
     /// </summary>
-    private static SftpClient? ConnectInteractive(ConnectionRequest request)
+    internal static SftpClient? ConnectInteractive(ConnectionRequest request)
     {
         while (true)
         {
@@ -125,16 +137,19 @@ internal static class Plugin
     private static (ConnectionRequest Target, long Stamp) Download(SftpClient client, ConnectionRequest target, string localPath)
     {
         string title = "Descargando " + target.RemotePath;
-        try
+        if (!target.Sudo)
         {
-            long stamp = ProgressDialog.Run(Npp.Handle, title, p => Sftp.Download(client, target.RemotePath, localPath, p));
-            return (target with { Sudo = false }, stamp);
+            try
+            {
+                long stamp = ProgressDialog.Run(Npp.Handle, title, p => Sftp.Download(client, target.RemotePath, localPath, p));
+                return (target, stamp);
+            }
+            catch (SftpPermissionDeniedException) when (AskSudo(target, "leer"))
+            {
+            }
         }
-        catch (SftpPermissionDeniedException) when (AskSudo(target, "leer"))
-        {
-            long stamp = ProgressDialog.Run(Npp.Handle, title + " (sudo)", p => Sudo.Download(target, localPath, p));
-            return (target with { Sudo = true }, stamp);
-        }
+        long sudoStamp = ProgressDialog.Run(Npp.Handle, title + " (sudo)", p => Sudo.Download(target, localPath, p));
+        return (target with { Sudo = true }, sudoStamp);
     }
 
     private static bool AskSudo(ConnectionRequest r, string action)
@@ -142,7 +157,7 @@ internal static class Plugin
         if (SudoAccounts.Contains(r.Account))
             return true;
         int answer = Win32.MessageBox(Npp.Handle,
-            $"{r.User} no tiene permiso para {action} {r.RemotePath}.\n\n¿Intentar con sudo (con la misma clave)?\n\n" +
+            $"{r.User} no tiene permiso para {action} {r.RemotePath}.\n\n¿Intentar con sudo (con la misma contraseña)?\n\n" +
             $"No se volverá a preguntar para {r.Account} mientras Notepad++ siga abierto.",
             Name, Win32.MB_YESNO | Win32.MB_ICONQUESTION);
         if (answer != Win32.IDYES)
@@ -151,7 +166,7 @@ internal static class Plugin
         return true;
     }
 
-    private static bool IsFile(SftpClient client, string path)
+    internal static bool IsFile(SftpClient client, string path)
     {
         try
         {
@@ -226,12 +241,13 @@ internal static class Plugin
 
     private static void Upload(string localPath, FileLink link)
     {
-        var request = WithKnownPassword(link.Target);
+        var request = WithKnownSecrets(link.Target);
         long expected = link.RemoteStamp;
         bool force = false;
+        bool ask = !HasCredentials(request);
         while (true)
         {
-            if (!Passwords.ContainsKey(request.Account))
+            if (ask)
             {
                 var r = ConnectDialog.Show(Npp.Handle, "Subir " + Path.GetFileName(localPath) + " al servidor",
                     "Subir", request, options: null);
@@ -241,6 +257,7 @@ internal static class Plugin
                     return;
                 }
                 request = r with { Sudo = request.Sudo };
+                ask = false;
             }
 
             try
@@ -253,7 +270,7 @@ internal static class Plugin
                     : Sftp.Upload(req, localPath, p, expected, f));
 
                 PendingUpload.Remove(localPath);
-                Passwords[request.Account] = request.Password;
+                RememberSecrets(request);
                 Config.MapFile(localPath, request, stamp);
                 Npp.SetStatus($"SFTP: subido {request.Display}{(request.Sudo ? " (sudo)" : "")} ({DateTime.Now:HH:mm:ss})");
                 return;
@@ -279,8 +296,8 @@ internal static class Plugin
             }
             catch (Exception ex)
             {
-                if (ex is SshAuthenticationException)
-                    Passwords.Remove(request.Account);
+                // Con credenciales malas, "Reintentar" vuelve a pedirlas.
+                ask = ForgetSecretsOnAuthError(request, ex);
                 int answer = Win32.MessageBox(Npp.Handle,
                     $"No se pudo subir a {request.Display}\n\n{Describe(ex)}\n\nLos cambios están guardados en la copia local:\n{localPath}",
                     Name, Win32.MB_RETRYCANCEL | Win32.MB_ICONERROR);
@@ -316,6 +333,9 @@ internal static class Plugin
     /// </summary>
     public static void OnReady()
     {
+        if (Config.GetFlag("panel", false))
+            RemotePanel.Toggle(show: true);
+
         var links = new List<(string LocalPath, FileLink Link)>();
         foreach (nuint id in Npp.OpenBufferIds())
         {
@@ -327,7 +347,7 @@ internal static class Plugin
         foreach (var group in links.GroupBy(l => l.Link.Target.Account))
         {
             var files = group.ToList();
-            var request = WithKnownPassword(files[0].Link.Target);
+            var request = WithKnownSecrets(files[0].Link.Target);
             string list = string.Join("\n", files.Select(f => "  " + f.Link.Target.RemotePath));
             int answer = Win32.MessageBox(Npp.Handle,
                 $"Hay {files.Count} fichero(s) remoto(s) de la sesión anterior en {group.Key}:\n\n{list}\n\n" +
@@ -336,7 +356,7 @@ internal static class Plugin
             if (answer != Win32.IDYES)
                 continue;
 
-            if (!Passwords.ContainsKey(request.Account))
+            if (!HasCredentials(request))
             {
                 var r = ConnectDialog.Show(Npp.Handle, "Conectar con " + group.Key, "Conectar", request, options: null);
                 if (r is null)
@@ -349,7 +369,7 @@ internal static class Plugin
                 using var client = ConnectInteractive(request);
                 if (client is null)
                     continue;
-                Passwords[request.Account] = request.Password;
+                RememberSecrets(request);
                 int unchanged = 0;
                 foreach (var (localPath, link) in files)
                     if (!RefreshIfChanged(client, localPath, link))
@@ -361,8 +381,7 @@ internal static class Plugin
             }
             catch (Exception ex)
             {
-                if (ex is SshAuthenticationException)
-                    Passwords.Remove(request.Account);
+                ForgetSecretsOnAuthError(request, ex);
                 ShowError("No se pudo comprobar " + group.Key, ex);
             }
         }
@@ -399,27 +418,57 @@ internal static class Plugin
         return true;
     }
 
+    // --- Credenciales en memoria ---
+
+    internal static void RememberSecrets(ConnectionRequest r) =>
+        Secrets[r.Account] = new Secret(r.Password, r.KeyFile, r.Passphrase);
+
+    /// <summary>Completa la petición con las últimas credenciales que funcionaron para esa cuenta.</summary>
+    internal static ConnectionRequest WithKnownSecrets(ConnectionRequest r) =>
+        Secrets.TryGetValue(r.Account, out var s)
+            ? r with { Password = s.Password, KeyFile = s.KeyFile, Passphrase = s.Passphrase }
+            : r;
+
+    /// <summary>Se puede conectar sin preguntar: credenciales de esta sesión, o clave privada sin frase.</summary>
+    internal static bool HasCredentials(ConnectionRequest r) =>
+        Secrets.ContainsKey(r.Account) ||
+        (r.KeyFile.Length > 0 && File.Exists(r.KeyFile) && !Sftp.KeyNeedsPassphrase(r.KeyFile));
+
+    /// <summary>Si el error es de credenciales, las olvida para volver a pedirlas. Devuelve si lo era.</summary>
+    internal static bool ForgetSecretsOnAuthError(ConnectionRequest r, Exception ex)
+    {
+        bool credentials = ex is SshAuthenticationException or SshPassPhraseNullOrEmptyException
+            || (ex is FileNotFoundException f && f.FileName == r.KeyFile)
+            || ex is KeyLoadException
+            || ex is SudoException { BadPassword: true };
+        if (!credentials)
+            return false;
+        Secrets.Remove(r.Account);
+        return true;
+    }
+
     // --- Varios ---
 
     public static void About()
     {
         Win32.MessageBox(Npp.Handle,
-            Name + "\n\n" +
-            "Abre ficheros de un servidor Linux por SSH (SFTP) indicando IP, usuario y clave.\n\n" +
+            Name + " " + Version + "\n\n" +
+            "Abre ficheros de un servidor Linux por SSH (SFTP) con usuario y contraseña o clave privada.\n\n" +
             "• Al conectar se muestran las carpetas y ficheros para navegar hasta el fichero:\n" +
             "   doble clic o Intro para entrar o abrir, Retroceso para subir de carpeta.\n" +
+            "• También hay un panel acoplable con el árbol de carpetas (Plugins → SshOpen → Panel remoto).\n" +
             "• El fichero se descarga a una copia en %TEMP%\\SshOpen.\n" +
             "• Al guardar (Ctrl+S) se sube automáticamente al servidor; si el fichero cambió\n" +
             "   en el servidor desde que lo abriste, avisa antes de sobrescribirlo.\n" +
             "• Si el usuario no tiene permiso sobre el fichero, ofrece leerlo y escribirlo con sudo.\n" +
-            "• Los perfiles guardan servidor, puerto, usuario y carpeta (nunca la clave).\n" +
-            "• La clave solo se guarda en memoria mientras Notepad++ está abierto.\n" +
+            "• Los perfiles guardan servidor, puerto, usuario, carpeta y ruta de la clave privada.\n" +
+            "• La contraseña y la frase de la clave solo se guardan en memoria mientras Notepad++ está abierto.\n" +
             "• La huella del servidor se pide la primera vez y se recuerda.",
             Name, Win32.MB_ICONINFORMATION);
     }
 
-    private static ConnectionRequest WithKnownPassword(ConnectionRequest r) =>
-        Passwords.TryGetValue(r.Account, out var password) ? r with { Password = password } : r;
+    private static string Version =>
+        typeof(Plugin).Assembly.GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "";
 
     /// <summary>
     /// %TEMP%\SshOpen\usuario@host_puerto\ruta\remota (sin "..", para no salir de la carpeta).
@@ -452,15 +501,18 @@ internal static class Plugin
     public static void ShowError(IntPtr owner, string title, Exception ex) =>
         Win32.MessageBox(owner, $"{title}\n\n{Describe(ex)}", Name, Win32.MB_ICONERROR);
 
-    private static string Describe(Exception ex) => ex switch
+    internal static string Describe(Exception ex) => ex switch
     {
-        SshAuthenticationException => "Usuario o clave incorrectos.",
+        SshAuthenticationException => "El servidor rechazó el usuario, la contraseña o la clave privada.",
+        SshPassPhraseNullOrEmptyException => "La clave privada está protegida: escribe su frase.",
+        FileNotFoundException => ex.Message,
         SftpPathNotFoundException => "La ruta remota no existe.",
         SftpPermissionDeniedException => "Permiso denegado en el servidor.",
         SshOperationTimeoutException => "Tiempo de espera agotado.",
         UntrustedHostKeyException => "La huella del servidor no está aceptada o ha cambiado: ábrelo con Ctrl+Alt+O para revisarla.",
         SocketException se => "No se puede conectar con el servidor: " + se.Message,
         SshConnectionException sc => "Error de conexión SSH: " + sc.Message,
+        KeyLoadException => ex.Message,
         _ => ex.Message,
     };
 }

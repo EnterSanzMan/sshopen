@@ -72,7 +72,9 @@ internal static unsafe class ProgressDialog
     private const int IdText = 301, IdBar = 302, IdDetail = 303;
     private const nuint TimerId = 1;
 
+    private const int ShowDelayMs = 400;
     private static bool _done, _cancelling, _determinate;
+    private static long _started;
     private static IntPtr _hwnd;
     private static Task _task = null!;
     private static TransferProgress _progress = null!;
@@ -97,7 +99,9 @@ internal static unsafe class ProgressDialog
         _task = task;
         SetTimer(_hwnd, TimerId, 100, IntPtr.Zero);
 
-        RunModal(owner, _hwnd, () => _done);
+        // Solo se muestra si tarda: una operación rápida (listar una carpeta) no hace parpadear nada.
+        _started = Environment.TickCount64;
+        RunModal(owner, _hwnd, () => _done, show: false);
         _hwnd = IntPtr.Zero;
 
         if (!task.IsCompleted)
@@ -152,6 +156,11 @@ internal static unsafe class ProgressDialog
             KillTimer(_hwnd, TimerId);
             _done = true;
             return;
+        }
+        if (IsWindowVisible(_hwnd) == 0 && Environment.TickCount64 - _started >= ShowDelayMs)
+        {
+            DialogHost.Show(_hwnd);
+            SetFocus(GetDlgItem(_hwnd, IDCANCEL));
         }
         if (_cancelling)
             return;

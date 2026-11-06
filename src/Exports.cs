@@ -9,7 +9,7 @@ namespace SshOpen;
 /// </summary>
 internal static unsafe class Exports
 {
-    private const int FuncCount = 4;
+    private const int FuncCount = 5;
     private static readonly IntPtr NamePtr = Marshal.StringToHGlobalUni(Plugin.Name);
     private static FuncItem* _funcs;
 
@@ -30,8 +30,9 @@ internal static unsafe class Exports
             _funcs = (FuncItem*)NativeMemory.AllocZeroed((nuint)(sizeof(FuncItem) * FuncCount));
             SetFunc(0, "Abrir fichero remoto (SSH)...", &Commands.OpenRemote, Shortcut(ctrl: true, alt: true, key: 'O'));
             SetFunc(1, "Subir fichero actual al servidor", &Commands.UploadCurrent, Shortcut(ctrl: true, alt: true, key: 'U'));
-            SetFunc(2, "", null); // separador
-            SetFunc(3, "Acerca de...", &Commands.About);
+            SetFunc(RemotePanel.MenuIndex, "Panel remoto", &Commands.TogglePanel);
+            SetFunc(3, "", null); // separador
+            SetFunc(4, "Acerca de...", &Commands.About);
         }
         *count = FuncCount;
         return _funcs;
@@ -51,8 +52,14 @@ internal static unsafe class Exports
                 nuint bufferId = header->IdFrom;
                 Commands.Guard(() => Plugin.OnFileSaved(bufferId));
                 break;
+            case Npp.NPPN_SHUTDOWN:
+                Commands.Guard(RemotePanel.Shutdown);
+                break;
         }
     }
+
+    /// <summary>Identificador de menú que Notepad++ asignó al comando <paramref name="index"/>.</summary>
+    public static int CmdId(int index) => _funcs == null ? 0 : _funcs[index].CmdID;
 
     [UnmanagedCallersOnly(EntryPoint = "messageProc")]
     private static nint MessageProc(uint message, nuint wParam, nint lParam) => 1;
@@ -83,6 +90,9 @@ internal static class Commands
 
     [UnmanagedCallersOnly]
     public static void UploadCurrent() => Guard(Plugin.UploadCurrent);
+
+    [UnmanagedCallersOnly]
+    public static void TogglePanel() => Guard(() => RemotePanel.Toggle());
 
     [UnmanagedCallersOnly]
     public static void About() => Guard(Plugin.About);
