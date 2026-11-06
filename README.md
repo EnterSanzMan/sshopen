@@ -82,6 +82,13 @@ que sobrescribe en el sitio y conserva propietario y permisos. Requiere que el u
 también en *Contraseña*. Una vez aceptado, no vuelve a preguntar para esa cuenta mientras
 Notepad++ siga abierto. La barra de estado indica `(sudo)`.
 
+### Idioma
+
+Los menús, diálogos y mensajes están en inglés y en español, y siguen el idioma de Notepad++:
+español si Notepad++ usa una traducción española (`spanish*.xml`), inglés en los demás casos.
+Los nombres de esta página son los de la versión en español. Las versiones antiguas de Notepad++
+que no informan de su idioma (`NPPM_GETNATIVELANGFILENAME`) muestran el plugin en inglés.
+
 ### Seguridad
 
 - La contraseña y la frase de la clave **solo viven en memoria** mientras Notepad++ está abierto.
@@ -146,9 +153,16 @@ Para que aparezca en *Plugins → Administrador de plugins*:
 - Notepad++ carga `plugins\SshOpen\SshOpen.dll` y llama a sus exportaciones C
   (`setInfo`, `getName`, `getFuncsArray`, `beNotified`, `messageProc`, `isUnicode`),
   generadas con `[UnmanagedCallersOnly]` y NativeAOT (`src/Exports.cs`).
-- Los diálogos y el panel son Win32 puro (`src/DialogHost.cs`, `src/ConnectDialog.cs`,
-  `src/BrowseDialog.cs`, `src/RemotePanel.cs`): WinForms no es compatible con NativeAOT. Siguen el
-  modo oscuro de Notepad++ (`NPPM_DARKMODESUBCLASSANDTHEME`, Notepad++ 8.5.4 o posterior).
+- Los diálogos y el panel son Win32 puro: WinForms no es compatible con NativeAOT. Cada ventana es
+  un objeto con su propio estado: `src/NativeWindow.cs` registra la clase, crea la ventana y pasa
+  los mensajes a su objeto; `src/ModalDialog.cs` añade el bucle modal. Encima van
+  `src/ConnectDialog.cs`, `src/BrowseDialog.cs`, `src/ProgressDialog.cs` y `src/RemotePanel.cs`.
+  Siguen el modo oscuro de Notepad++ (`NPPM_DARKMODESUBCLASSANDTHEME`, Notepad++ 8.5.4 o posterior).
+- Las declaraciones de Win32 (funciones, estructuras, constantes) las genera
+  [CsWin32](https://github.com/microsoft/CsWin32) al compilar a partir de `NativeMethods.txt`;
+  `src/Win32.cs` solo añade nombres cortos y funciones auxiliares. Para usar otra función o
+  constante de Windows, añade su nombre a `NativeMethods.txt`.
+- Todos los textos de la interfaz están en `src/Tr.cs`, en inglés y en español.
 - El panel se registra con `NPPM_DMMREGASDCKDLG`; Notepad++ recuerda dónde estaba acoplado.
   Su árbol está en `src/RemoteTree.cs` y su conexión persistente, con reconexión, en
   `src/PanelConnection.cs`.

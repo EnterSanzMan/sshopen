@@ -25,7 +25,7 @@ internal struct NotifyHeader
 [StructLayout(LayoutKind.Sequential)]
 internal struct TbData
 {
-    public IntPtr hClient;
+    public HWND hClient;
     public IntPtr pszName;
     public int dlgID;          // índice en funcItem del comando que muestra el panel
     public uint uMask;         // DWS_DF_CONT_*, DWS_ICONTAB...
@@ -77,6 +77,7 @@ internal static unsafe class Npp
     private const uint NPPM_SETMENUITEMCHECK = NPPMSG + 40;
     private const uint NPPM_DOOPEN = NPPMSG + 77;
     private const uint NPPM_DARKMODESUBCLASSANDTHEME = NPPMSG + 112;
+    private const uint NPPM_GETNATIVELANGFILENAME = NPPMSG + 116;
     private const nuint DarkModeInit = 0x0000000B; // NppDarkMode::dmfInit
     private const nuint STATUSBAR_DOC_TYPE = 0;
 
@@ -85,34 +86,34 @@ internal static unsafe class Npp
     public const uint NPPN_SHUTDOWN = 1000 + 9;
 
     /// <summary>Notificación de cierre de un panel acoplado (dockingResource.h: DMN_FIRST + 1).</summary>
-    public const int DMN_CLOSE = 1050 + 1;
+    public const uint DMN_CLOSE = 1050 + 1;
 
-    public static IntPtr Handle;
+    public static HWND Handle;
 
-    public static void OpenFile(string path) => Win32.SendMessage(Handle, NPPM_DOOPEN, 0, path);
+    public static void OpenFile(string path) => Send(NPPM_DOOPEN, 0, path);
 
     public static void SetMenuItemCheck(int cmdId, bool check) =>
-        Win32.SendMessage(Handle, NPPM_SETMENUITEMCHECK, (nuint)cmdId, check ? 1 : 0);
+        Send(NPPM_SETMENUITEMCHECK, (nuint)cmdId, check ? 1 : 0);
 
     /// <summary>Registra una ventana como panel acoplable. <paramref name="data"/> y sus cadenas deben vivir siempre.</summary>
-    public static void RegisterDockingPanel(TbData* data) => Win32.SendMessage(Handle, NPPM_DMMREGASDCKDLG, 0, (nint)data);
+    public static void RegisterDockingPanel(TbData* data) => Send(NPPM_DMMREGASDCKDLG, 0, (nint)data);
 
-    public static void ShowDockingPanel(IntPtr hwnd) => Win32.SendMessage(Handle, NPPM_DMMSHOW, 0, hwnd);
+    public static void ShowDockingPanel(HWND hwnd) => Send(NPPM_DMMSHOW, 0, (nint)hwnd);
 
-    public static void HideDockingPanel(IntPtr hwnd) => Win32.SendMessage(Handle, NPPM_DMMHIDE, 0, hwnd);
+    public static void HideDockingPanel(HWND hwnd) => Send(NPPM_DMMHIDE, 0, (nint)hwnd);
 
     /// <summary>
     /// Mete o saca una ventana de la lista de diálogos no modales: Notepad++ le pasa entonces los
     /// mensajes por IsDialogMessage antes que por sus atajos (Tab, Intro y F5 llegan al panel).
     /// </summary>
-    public static void RegisterModeless(IntPtr hwnd, bool add) =>
-        Win32.SendMessage(Handle, NPPM_MODELESSDIALOG, add ? MODELESSDIALOGADD : MODELESSDIALOGREMOVE, hwnd);
+    public static void RegisterModeless(HWND hwnd, bool add) =>
+        Send(NPPM_MODELESSDIALOG, add ? MODELESSDIALOGADD : MODELESSDIALOGREMOVE, (nint)hwnd);
 
     /// <summary>Aplica el modo oscuro de Notepad++ (si está activo) a un diálogo propio ya con sus controles.</summary>
-    public static void ApplyDarkMode(IntPtr hwnd) => Win32.SendMessage(Handle, NPPM_DARKMODESUBCLASSANDTHEME, DarkModeInit, hwnd);
+    public static void ApplyDarkMode(HWND hwnd) => Send(NPPM_DARKMODESUBCLASSANDTHEME, DarkModeInit, (nint)hwnd);
 
     /// <summary>Recarga desde disco un fichero ya abierto, sin preguntar.</summary>
-    public static void ReloadFile(string path) => Win32.SendMessage(Handle, NPPM_RELOADFILE, 0, path);
+    public static void ReloadFile(string path) => Send(NPPM_RELOADFILE, 0, path);
 
     /// <summary>Buffers abiertos en las dos vistas (incluye los "new N" sin ruta).</summary>
     public static List<nuint> OpenBufferIds()
@@ -120,10 +121,10 @@ internal static unsafe class Npp
         var ids = new List<nuint>();
         for (int view = 0; view < 2; view++)
         {
-            int count = (int)Win32.SendMessage(Handle, NPPM_GETNBOPENFILES, 0, view + 1); // 1 = vista principal, 2 = secundaria
+            int count = (int)Send(NPPM_GETNBOPENFILES, 0, view + 1); // 1 = vista principal, 2 = secundaria
             for (int i = 0; i < count; i++)
             {
-                nuint id = (nuint)Win32.SendMessage(Handle, NPPM_GETBUFFERIDFROMPOS, (nuint)i, view);
+                nuint id = (nuint)Send(NPPM_GETBUFFERIDFROMPOS, (nuint)i, view);
                 if (id != 0)
                     ids.Add(id);
             }
@@ -131,20 +132,20 @@ internal static unsafe class Npp
         return ids;
     }
 
-    public static bool SaveCurrentFile() => Win32.SendMessage(Handle, NPPM_SAVECURRENTFILE, 0, 0) != 0;
+    public static bool SaveCurrentFile() => Send(NPPM_SAVECURRENTFILE, 0, 0) != 0;
 
-    public static void SetStatus(string text) => Win32.SendMessage(Handle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, text);
+    public static void SetStatus(string text) => Send(NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, text);
 
-    public static nuint CurrentBufferId => (nuint)Win32.SendMessage(Handle, NPPM_GETCURRENTBUFFERID, 0, 0);
+    public static nuint CurrentBufferId => (nuint)Send(NPPM_GETCURRENTBUFFERID, 0, 0);
 
     public static string? GetBufferPath(nuint bufferId)
     {
-        int len = (int)Win32.SendMessage(Handle, NPPM_GETFULLPATHFROMBUFFERID, bufferId, 0);
+        int len = (int)Send(NPPM_GETFULLPATHFROMBUFFERID, bufferId, 0);
         if (len <= 0)
             return null;
         var buffer = new char[len + 1];
         fixed (char* p = buffer)
-            Win32.SendMessage(Handle, NPPM_GETFULLPATHFROMBUFFERID, bufferId, (nint)p);
+            Send(NPPM_GETFULLPATHFROMBUFFERID, bufferId, (nint)p);
         return new string(buffer, 0, len);
     }
 
@@ -152,10 +153,29 @@ internal static unsafe class Npp
     {
         var buffer = new char[1024];
         fixed (char* p = buffer)
-            Win32.SendMessage(Handle, NPPM_GETPLUGINSCONFIGDIR, (nuint)buffer.Length, (nint)p);
+            Send(NPPM_GETPLUGINSCONFIGDIR, (nuint)buffer.Length, (nint)p);
         string dir = new string(buffer).TrimEnd('\0');
         if (dir.Length == 0)
             dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Notepad++", "plugins", "config");
         return dir;
     }
+
+    /// <summary>
+    /// Nombre del fichero de idioma de Notepad++ (p. ej. "spanish.xml"); vacío si usa el inglés
+    /// de serie o si la versión de Notepad++ es antigua y no tiene este mensaje.
+    /// </summary>
+    public static string GetNativeLangFileName()
+    {
+        int len = (int)Send(NPPM_GETNATIVELANGFILENAME, 0, 0);
+        if (len <= 0 || len > 1024)
+            return "";
+        var buffer = new byte[len + 1];
+        fixed (byte* p = buffer)
+            Send(NPPM_GETNATIVELANGFILENAME, (nuint)buffer.Length, (nint)p);
+        return System.Text.Encoding.ASCII.GetString(buffer, 0, len);
+    }
+
+    private static nint Send(uint msg, nuint wParam, nint lParam) => PInvoke.SendMessage(Handle, msg, wParam, lParam);
+
+    private static nint Send(uint msg, nuint wParam, string text) => Win32.SendMessage(Handle, msg, wParam, text);
 }

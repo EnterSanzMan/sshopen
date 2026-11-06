@@ -33,7 +33,7 @@ internal static class LocalCopies
     /// </summary>
     public static string PathFor(ConnectionRequest r)
     {
-        var parts = new List<string> { Win32.GetLongPathName(Path.GetTempPath()), Plugin.Name, Sanitize($"{r.User}@{r.Host}_{r.Port}") };
+        var parts = new List<string> { Win32.LongPath(Path.GetTempPath()), Plugin.Name, Sanitize($"{r.User}@{r.Host}_{r.Port}") };
         parts.AddRange(r.SftpPath.Replace('\\', '/')
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .Where(p => p != "." && p != "..")

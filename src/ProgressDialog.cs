@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-using static SshOpen.DialogHost;
 using static SshOpen.Win32;
 
 namespace SshOpen;
@@ -67,42 +65,62 @@ internal sealed class ProgressStream(Stream inner, TransferProgress progress) : 
 /// de progreso y botón Cancelar, de modo que Notepad++ siga repintándose. Devuelve el resultado
 /// de la operación o relanza su excepción (OperationCanceledException si se canceló).
 /// </summary>
-internal static unsafe class ProgressDialog
+internal sealed unsafe class ProgressDialog : ModalDialog
 {
     private const int IdText = 301, IdBar = 302, IdDetail = 303;
     private const nuint TimerId = 1;
-
     private const int ShowDelayMs = 400;
-    private static bool _done, _cancelling, _determinate;
-    private static long _started;
-    private static IntPtr _hwnd;
-    private static Task _task = null!;
-    private static TransferProgress _progress = null!;
-    private static CancellationTokenSource _cts = null!;
 
-    public static T Run<T>(IntPtr owner, string text, Func<TransferProgress, T> work)
+    private readonly CancellationTokenSource _cts = new();
+    private readonly TransferProgress _progress;
+    private Task _task = Task.CompletedTask;
+    private bool _cancelling, _determinate;
+    private long _started;
+
+    private ProgressDialog() => _progress = new TransferProgress { Token = _cts.Token };
+
+    public static T Run<T>(HWND owner, string text, Func<TransferProgress, T> work)
     {
-        _done = _cancelling = _determinate = false;
-        _cts = new CancellationTokenSource();
-        _progress = new TransferProgress { Token = _cts.Token };
+        var dialog = new ProgressDialog();
+        try
+        {
+            return dialog.Execute(owner, text, work);
+        }
+        finally
+        {
+            dialog._cts.Dispose();
+        }
+    }
 
-        _hwnd = CreateFrame(owner, "SshOpenProgressDialog", &WndProc, Plugin.Name, 420, 118);
-        Child(_hwnd, 0, "STATIC", text, 0, 14, 14, 392, 20, IdText);
-        IntPtr bar = Child(_hwnd, 0, "msctls_progress32", "", PBS_MARQUEE, 14, 40, 392, 18, IdBar);
-        SendMessage(bar, PBM_SETRANGE32, 0, 1000);
-        SendMessage(bar, PBM_SETMARQUEE, 1, 0);
-        Child(_hwnd, 0, "STATIC", "", 0, 14, 84, 290, 20, IdDetail);
-        Child(_hwnd, 0, "BUTTON", "Cancelar", WS_TABSTOP | BS_DEFPUSHBUTTON, 316, 78, 90, 28, IDCANCEL);
-        SetFocus(GetDlgItem(_hwnd, IDCANCEL));
+    protected override HWND DefaultFocus => Item(IDCANCEL);
 
-        var task = Task.Run(() => work(_progress), CancellationToken.None);
-        _task = task;
-        SetTimer(_hwnd, TimerId, 100, IntPtr.Zero);
+    private T Execute<T>(HWND owner, string text, Func<TransferProgress, T> work)
+    {
+        CreateFrame(owner, "SshOpenProgressDialog", Plugin.Name, 420, 118);
+        Task<T> task;
+        try
+        {
+            Child(0, "STATIC", text, 0, 14, 14, 392, 20, IdText);
+            HWND bar = Child(0, "msctls_progress32", "", PBS_MARQUEE, 14, 40, 392, 18, IdBar);
+            PInvoke.SendMessage(bar, PBM_SETRANGE32, 0, 1000);
+            PInvoke.SendMessage(bar, PBM_SETMARQUEE, 1, 0);
+            Child(0, "STATIC", "", 0, 14, 84, 290, 20, IdDetail);
+            Child(0, "BUTTON", Tr.Cancel, WS_TABSTOP | BS_DEFPUSHBUTTON, 316, 78, 90, 28, IDCANCEL);
+            SetFocus(Item(IDCANCEL));
+
+            task = Task.Run(() => work(_progress), CancellationToken.None);
+            _task = task;
+            SetTimer(Handle, TimerId, 100, null);
+            _started = Environment.TickCount64;
+        }
+        catch
+        {
+            Close();
+            throw;
+        }
 
         // Solo se muestra si tarda: una operación rápida (listar una carpeta) no hace parpadear nada.
-        _started = Environment.TickCount64;
-        RunModal(owner, _hwnd, () => _done, show: false);
-        _hwnd = IntPtr.Zero;
+        RunModal(show: false);
 
         if (!task.IsCompleted)
             _cts.Cancel(); // el bucle salió por WM_QUIT: no dejar la operación suelta
@@ -114,53 +132,45 @@ internal static unsafe class ProgressDialog
         {
             throw new OperationCanceledException();
         }
-        finally
-        {
-            _cts.Dispose();
-        }
     }
 
-    [UnmanagedCallersOnly]
-    private static nint WndProc(IntPtr hwnd, uint msg, nuint wParam, nint lParam)
+    protected override nint? OnDialogMessage(uint msg, WPARAM wParam, LPARAM lParam)
     {
-        try
+        switch (msg)
         {
-            switch (msg)
-            {
-                case WM_TIMER:
-                    Tick();
-                    return 0;
-                case WM_ACTIVATE:
-                    OnActivate(hwnd, wParam, GetDlgItem(hwnd, IDCANCEL));
-                    return 0;
-                case WM_CLOSE:
-                    Cancel();
-                    return 0;
-                case WM_COMMAND:
-                    if ((int)(wParam & 0xFFFF) == IDCANCEL)
-                        Cancel();
-                    return 0;
-            }
+            case WM_TIMER:
+                Tick();
+                return 0;
+            case WM_COMMAND:
+                if (LoWord(wParam) == IDCANCEL)
+                    OnCancel();
+                return 0;
         }
-        catch (Exception ex)
-        {
-            Prompts.Error(hwnd, "Error en el diálogo de progreso", ex);
-        }
-        return DefWindowProc(hwnd, msg, wParam, lParam);
+        return null;
     }
 
-    private static void Tick()
+    protected override void OnCancel()
+    {
+        if (_cancelling)
+            return;
+        _cancelling = true;
+        _cts.Cancel();
+        SetText(IdDetail, Tr.Cancelling);
+        Enable(IDCANCEL, false);
+    }
+
+    private void Tick()
     {
         if (_task.IsCompleted)
         {
-            KillTimer(_hwnd, TimerId);
-            _done = true;
+            KillTimer(Handle, TimerId);
+            Done = true;
             return;
         }
-        if (IsWindowVisible(_hwnd) == 0 && Environment.TickCount64 - _started >= ShowDelayMs)
+        if (!IsWindowVisible(Handle) && Environment.TickCount64 - _started >= ShowDelayMs)
         {
-            DialogHost.Show(_hwnd);
-            SetFocus(GetDlgItem(_hwnd, IDCANCEL));
+            ShowFrame();
+            SetFocus(Item(IDCANCEL));
         }
         if (_cancelling)
             return;
@@ -169,25 +179,16 @@ internal static unsafe class ProgressDialog
         if (total <= 0)
             return;
 
-        IntPtr bar = GetDlgItem(_hwnd, IdBar);
+        HWND bar = Item(IdBar);
         if (!_determinate)
         {
             // Pasar de marquesina a barra real exige quitar el estilo PBS_MARQUEE.
-            SendMessage(bar, PBM_SETMARQUEE, 0, 0);
-            SetWindowLongPtr(bar, GWL_STYLE, GetWindowLongPtr(bar, GWL_STYLE) & ~(nint)PBS_MARQUEE);
+            PInvoke.SendMessage(bar, PBM_SETMARQUEE, 0, 0);
+            SetWindowLongPtr(bar, WINDOW_LONG_PTR_INDEX.GWL_STYLE,
+                GetWindowLongPtr(bar, WINDOW_LONG_PTR_INDEX.GWL_STYLE) & ~(nint)PBS_MARQUEE);
             _determinate = true;
         }
-        SendMessage(bar, PBM_SETPOS, (nuint)Math.Min(1000, done * 1000 / total), 0);
-        SetText(_hwnd, IdDetail, $"{FormatSize(done)} de {FormatSize(total)}");
-    }
-
-    private static void Cancel()
-    {
-        if (_cancelling)
-            return;
-        _cancelling = true;
-        _cts.Cancel();
-        SetText(_hwnd, IdDetail, "Cancelando...");
-        EnableWindow(GetDlgItem(_hwnd, IDCANCEL), 0);
+        PInvoke.SendMessage(bar, PBM_SETPOS, (nuint)Math.Min(1000, done * 1000 / total), 0);
+        SetText(IdDetail, Tr.TransferDetail(done, total));
     }
 }

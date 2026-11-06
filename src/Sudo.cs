@@ -59,11 +59,11 @@ internal static class Sudo
                 return; // NOPASSWD o credenciales ya en caché
         }
         if (password.Length == 0) // entrada con clave privada y sin contraseña
-            throw new SudoException("sudo pide la contraseña del usuario: escríbela también en el campo Contraseña.", badPassword: true);
+            throw new SudoException(Tr.SudoNeedsPassword, badPassword: true);
         using var stdin = new MemoryStream(Encoding.UTF8.GetBytes(password + "\n"));
         try
         {
-            Run(ssh, "sudo -S -p '' -v", stdin, "sudo ha rechazado la contraseña o el usuario no puede usar sudo");
+            Run(ssh, "sudo -S -p '' -v", stdin, Tr.SudoRejected);
         }
         catch (SudoException e)
         {
@@ -87,7 +87,7 @@ internal static class Sudo
         if (cmd.ExitStatus != 0)
         {
             string error = cmd.Error.Trim();
-            throw new SudoException((failureHint ?? "sudo ha fallado") + (error.Length > 0 ? ":\n" + error : "."));
+            throw new SudoException((failureHint ?? Tr.SudoFailed) + (error.Length > 0 ? ":\n" + error : "."));
         }
         return output;
     }

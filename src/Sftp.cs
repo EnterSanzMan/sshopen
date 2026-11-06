@@ -30,14 +30,14 @@ internal sealed record ConnectionRequest(string Host, int Port, string User, str
 
 /// <summary>El servidor presentó una huella que no está aceptada (primera conexión o cambio).</summary>
 internal sealed class UntrustedHostKeyException(string fingerprint, string? known)
-    : Exception("La huella del servidor no está aceptada.")
+    : Exception(Tr.HostKeyNotAccepted)
 {
     public string Fingerprint => fingerprint;
     public string? Known => known;
 }
 
 /// <summary>El fichero remoto cambió (o desapareció: <see cref="Current"/> = 0) desde la última sincronización.</summary>
-internal sealed class RemoteChangedException(long current) : Exception("El fichero remoto ha cambiado en el servidor.")
+internal sealed class RemoteChangedException(long current) : Exception(Tr.RemoteFileChanged)
 {
     /// <summary>Fecha de modificación actual en segundos Unix; 0 si ya no existe.</summary>
     public long Current => current;
@@ -46,8 +46,8 @@ internal sealed class RemoteChangedException(long current) : Exception("El fiche
 /// <summary>No se pudo leer la clave privada (frase incorrecta, formato no admitido o fichero dañado).</summary>
 internal sealed class KeyLoadException(string path, bool withPassphrase, Exception inner) : Exception(
     (withPassphrase
-        ? "No se pudo abrir la clave privada: la frase no es correcta o el formato no está admitido."
-        : "No se pudo leer la clave privada: el formato no está admitido o el fichero está dañado.")
+        ? Tr.KeyBadPassphrase
+        : Tr.KeyUnreadable)
     + "\n" + path + "\n(" + inner.Message + ")", inner);
 
 /// <summary>Descarga y subida de ficheros por SFTP (subsistema SSH; el servidor no necesita scp).</summary>
@@ -238,7 +238,7 @@ internal static class Sftp
     private static PrivateKeyFile LoadKey(string path, string passphrase)
     {
         if (!File.Exists(path))
-            throw new FileNotFoundException("No se encuentra el fichero de clave privada:\n" + path, path);
+            throw new FileNotFoundException(Tr.KeyFileNotFound(path), path);
         var id = (path, passphrase, File.GetLastWriteTimeUtc(path));
         lock (KeysLock)
         {

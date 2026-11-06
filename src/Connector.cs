@@ -23,7 +23,7 @@ internal static class Connector
         {
             if (ask)
             {
-                var r = ConnectDialog.Show(Npp.Handle, title, "Conectar", request, options);
+                var r = ConnectDialog.Show(Npp.Handle, title, Tr.ConnectButton, request, options);
                 if (r is null)
                     return null;
                 request = r;
@@ -44,7 +44,7 @@ internal static class Connector
             catch (Exception ex)
             {
                 Credentials.ForgetIfRejected(request, ex);
-                Prompts.Error("No se pudo conectar con " + request.Display, ex);
+                Prompts.Error(Tr.CannotConnect(request.Display), ex);
             }
         }
     }
@@ -59,7 +59,7 @@ internal static class Connector
         {
             try
             {
-                return ProgressDialog.Run(Npp.Handle, $"Conectando con {request.User}@{request.Host}:{request.Port}...",
+                return ProgressDialog.Run(Npp.Handle, Tr.Connecting(request.User, request.Host, request.Port),
                     p => Sftp.Connect(request, p.Token));
             }
             catch (UntrustedHostKeyException e)

@@ -17,7 +17,7 @@ internal static unsafe class Exports
     private static int IsUnicode() => 1;
 
     [UnmanagedCallersOnly(EntryPoint = "setInfo")]
-    private static void SetInfo(NppData data) => Npp.Handle = data.NppHandle;
+    private static void SetInfo(NppData data) => Npp.Handle = (HWND)data.NppHandle;
 
     [UnmanagedCallersOnly(EntryPoint = "getName")]
     private static IntPtr GetName() => NamePtr;
@@ -28,11 +28,11 @@ internal static unsafe class Exports
         if (_funcs == null)
         {
             _funcs = (FuncItem*)NativeMemory.AllocZeroed((nuint)(sizeof(FuncItem) * FuncCount));
-            SetFunc(0, "Abrir fichero remoto (SSH)...", &Commands.OpenRemote, Shortcut(ctrl: true, alt: true, key: 'O'));
-            SetFunc(1, "Subir fichero actual al servidor", &Commands.UploadCurrent, Shortcut(ctrl: true, alt: true, key: 'U'));
-            SetFunc(RemotePanel.MenuIndex, "Panel remoto", &Commands.TogglePanel);
+            SetFunc(0, Tr.MenuOpenRemote, &Commands.OpenRemote, Shortcut(ctrl: true, alt: true, key: 'O'));
+            SetFunc(1, Tr.MenuUpload, &Commands.UploadCurrent, Shortcut(ctrl: true, alt: true, key: 'U'));
+            SetFunc(RemotePanel.MenuIndex, Tr.MenuPanel, &Commands.TogglePanel);
             SetFunc(3, "", null); // separador
-            SetFunc(4, "Acerca de...", &Commands.About);
+            SetFunc(4, Tr.MenuAbout, &Commands.About);
         }
         *count = FuncCount;
         return _funcs;
@@ -41,7 +41,7 @@ internal static unsafe class Exports
     [UnmanagedCallersOnly(EntryPoint = "beNotified")]
     private static void BeNotified(NotifyHeader* header)
     {
-        if (header->HwndFrom != Npp.Handle)
+        if (header->HwndFrom != (nint)Npp.Handle)
             return;
         switch (header->Code)
         {
@@ -106,7 +106,7 @@ internal static class Commands
         }
         catch (Exception ex)
         {
-            Prompts.Error("Error inesperado", ex);
+            Prompts.Error(Tr.UnexpectedError, ex);
         }
     }
 }

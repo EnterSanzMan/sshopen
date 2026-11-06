@@ -25,7 +25,7 @@ internal static class Plugin
 
         while (true)
         {
-            if (Connector.ConnectWithDialog("Abrir fichero remoto (SSH/SFTP)", request, options) is not { } connection)
+            if (Connector.ConnectWithDialog(Tr.OpenRemoteTitle, request, options) is not { } connection)
                 return;
             request = connection.Request;
             using var client = connection.Client;
@@ -35,7 +35,7 @@ internal static class Plugin
                 // carpeta con él seleccionado; si no existe, el explorador vuelve al home.
                 string folder = Connector.StartFolder(client, request.RemotePath, out string? select);
                 string? path = BrowseDialog.Show(Npp.Handle, client, folder, select,
-                    $"{request.User}@{request.Host} - Elige el fichero a abrir", out string lastFolder);
+                    Tr.BrowseTitle($"{request.User}@{request.Host}"), out string lastFolder);
                 Config.SaveLast(request with { RemotePath = lastFolder }, options.Remember, options.Profile);
                 if (path is null)
                     return;
@@ -49,7 +49,7 @@ internal static class Plugin
             catch (Exception ex)
             {
                 Credentials.ForgetIfRejected(request, ex);
-                Prompts.Error("No se pudo abrir " + request.Display, ex);
+                Prompts.Error(Tr.CannotOpen(request.Display), ex);
             }
         }
     }
@@ -77,13 +77,13 @@ internal static class Plugin
 
         Config.MapFile(localPath, target, stamp);
         Npp.OpenFile(localPath);
-        Npp.SetStatus($"SFTP: abierto {target.Display}{SudoSuffix(target)}");
+        Npp.SetStatus(Tr.StatusOpened(target.Display + SudoSuffix(target)));
     }
 
     /// <summary>Descarga por SFTP; sin permiso de lectura ofrece hacerlo con sudo. Devuelve el destino y la fecha remota.</summary>
     private static (ConnectionRequest Target, long Stamp) Download(SftpClient client, ConnectionRequest target, string localPath)
     {
-        string title = "Descargando " + target.RemotePath;
+        string title = Tr.Downloading(target.RemotePath);
         if (!target.Sudo)
         {
             try
@@ -91,7 +91,7 @@ internal static class Plugin
                 long stamp = ProgressDialog.Run(Npp.Handle, title, p => Sftp.Download(client, target.RemotePath, localPath, p));
                 return (target, stamp);
             }
-            catch (SftpPermissionDeniedException) when (Prompts.UseSudo(target, "leer"))
+            catch (SftpPermissionDeniedException) when (Prompts.UseSudo(target, write: false))
             {
             }
         }
@@ -103,9 +103,9 @@ internal static class Plugin
 
     public static void OnFileSaved(nuint bufferId)
     {
-        // Con un diálogo abierto no se puede abrir otro (estado estático); el fichero queda
+        // Con un diálogo abierto no se pregunta nada más (credenciales, conflictos); el fichero queda
         // pendiente y se sube con "Subir fichero actual" o en el siguiente guardado.
-        if (_suppressAutoUpload || DialogHost.IsOpen)
+        if (_suppressAutoUpload || ModalDialog.AnyOpen)
             return;
         string? path = Npp.GetBufferPath(bufferId);
         if (path != null && Config.TryGetLink(path, out var link))
@@ -117,7 +117,7 @@ internal static class Plugin
         string? path = Npp.GetBufferPath(Npp.CurrentBufferId);
         if (path == null || !Config.TryGetLink(path, out var link))
         {
-            Prompts.Info("El fichero actual no se abrió con " + Name + ".");
+            Prompts.Info(Tr.NotOpenedWithPlugin);
             return;
         }
 
@@ -133,7 +133,7 @@ internal static class Plugin
         }
         if (!saved)
         {
-            Prompts.Warning("No se pudo guardar la copia local, así que no se ha subido nada.");
+            Prompts.Warning(Tr.CouldNotSaveLocal);
             return;
         }
         Upload(path, link);
@@ -149,11 +149,11 @@ internal static class Plugin
         {
             if (ask)
             {
-                var r = ConnectDialog.Show(Npp.Handle, "Subir " + Path.GetFileName(localPath) + " al servidor",
-                    "Subir", request, options: null);
+                var r = ConnectDialog.Show(Npp.Handle, Tr.UploadTitle(Path.GetFileName(localPath)),
+                    Tr.UploadButton, request, options: null);
                 if (r is null)
                 {
-                    GiveUpUpload(localPath, "subida cancelada");
+                    GiveUpUpload(localPath, Tr.UploadCancelled);
                     return;
                 }
                 request = r with { Sudo = request.Sudo };
@@ -164,17 +164,17 @@ internal static class Plugin
             {
                 var req = request; // copia estable para el hilo de trabajo
                 bool f = force;
-                long stamp = ProgressDialog.Run(Npp.Handle, $"Subiendo {request.RemotePath}{SudoSuffix(request)}", p => req.Sudo
+                long stamp = ProgressDialog.Run(Npp.Handle, Tr.Uploading(request.RemotePath + SudoSuffix(request)), p => req.Sudo
                     ? Sudo.Upload(req, localPath, p, expected, f)
                     : Sftp.Upload(req, localPath, p, expected, f));
 
                 LocalCopies.MarkSynced(localPath);
                 Credentials.Remember(request);
                 Config.MapFile(localPath, request, stamp);
-                Npp.SetStatus($"SFTP: subido {request.Display}{SudoSuffix(request)} ({DateTime.Now:HH:mm:ss})");
+                Npp.SetStatus(Tr.StatusUploaded(request.Display + SudoSuffix(request), DateTime.Now));
                 return;
             }
-            catch (SftpPermissionDeniedException) when (!request.Sudo && Prompts.UseSudo(request, "escribir en"))
+            catch (SftpPermissionDeniedException) when (!request.Sudo && Prompts.UseSudo(request, write: true))
             {
                 request = request with { Sudo = true };
             }
@@ -182,14 +182,14 @@ internal static class Plugin
             {
                 if (!Prompts.OverwriteRemote(request, e.Current))
                 {
-                    GiveUpUpload(localPath, "no se ha subido");
+                    GiveUpUpload(localPath, Tr.NotUploaded);
                     return;
                 }
                 force = true;
             }
             catch (OperationCanceledException)
             {
-                GiveUpUpload(localPath, "subida cancelada");
+                GiveUpUpload(localPath, Tr.UploadCancelled);
                 return;
             }
             catch (Exception ex)
@@ -198,7 +198,7 @@ internal static class Plugin
                 ask = Credentials.ForgetIfRejected(request, ex);
                 if (!Prompts.RetryUpload(request, ex, localPath))
                 {
-                    GiveUpUpload(localPath, "no se ha subido");
+                    GiveUpUpload(localPath, Tr.NotUploaded);
                     return;
                 }
             }
@@ -208,7 +208,7 @@ internal static class Plugin
     private static void GiveUpUpload(string localPath, string reason)
     {
         LocalCopies.MarkPending(localPath);
-        Npp.SetStatus($"SFTP: {reason}, los cambios solo están en la copia local");
+        Npp.SetStatus(Tr.StatusGaveUp(reason));
     }
 
     // --- Arranque de Notepad++ ---
@@ -237,7 +237,7 @@ internal static class Plugin
                 continue;
 
             var request = Credentials.Fill(files[0].Link.Target);
-            var connection = Connector.ConnectWithDialog("Conectar con " + group.Key, request, options: null,
+            var connection = Connector.ConnectWithDialog(Tr.ConnectTo(group.Key), request, options: null,
                 askFirst: !Credentials.CanConnectSilently(request));
             if (connection is null)
                 continue;
@@ -247,7 +247,7 @@ internal static class Plugin
             foreach (var (localPath, link) in files)
                 if (!RefreshIfChanged(client, localPath, link))
                     unchanged++;
-            Npp.SetStatus($"SFTP: {group.Key} comprobado, {unchanged} de {files.Count} fichero(s) sin cambios en el servidor");
+            Npp.SetStatus(Tr.StatusChecked(group.Key, unchanged, files.Count));
         }
     }
 
@@ -272,7 +272,7 @@ internal static class Plugin
         }
         catch (Exception ex)
         {
-            Prompts.Error("No se pudo descargar " + link.Target.RemotePath, ex);
+            Prompts.Error(Tr.CannotDownload(link.Target.RemotePath), ex);
         }
         return true;
     }
