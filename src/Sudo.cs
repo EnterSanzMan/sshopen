@@ -76,13 +76,14 @@ internal static class Sudo
     {
         using var cmd = ssh.CreateCommand(commandText);
         cmd.CommandTimeout = TimeSpan.FromSeconds(60);
-        var input = stdin != null ? cmd.CreateInputStream() : null;
+        // SSH.NET solo deja crear el flujo de entrada con el comando ya en marcha
+        // (antes de BeginExecute lanza "The input stream can be used only during execution").
         var pending = cmd.BeginExecute();
-        if (input != null)
+        if (stdin != null)
         {
-            stdin!.CopyTo(input);
-            input.Dispose(); // EOF para que el comando termine
-        }
+            using var input = cmd.CreateInputStream();
+            stdin.CopyTo(input);
+        } // al cerrarlo se envía EOF para que el comando termine
         string output = cmd.EndExecute(pending);
         if (cmd.ExitStatus != 0)
         {
